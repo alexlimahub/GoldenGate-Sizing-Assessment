@@ -32,29 +32,55 @@ REVIEW: Columns requiring GoldenGate datatype or object-shape review: 27
 
 Workload summary
 ================
-Archived-log workload source: peak hourly=186.42 GB/hour, average hourly=74.381 GB/hour, peak daily=1368.92 GB/day.
-Note: archived-log workload is a practical database-level fallback. If only selected PDBs or schemas are replicated, it may overstate GoldenGate workload.
+- Archived-log peak hourly: 186.42 GB/hour
+- Archived-log average hourly: 74.381 GB/hour
+- Archived-log peak daily: 1368.92 GB/day
+- Note: archived logs are a database-level fallback and may overstate selected-PDB/schema scope.
 
 Replication object scope
 ========================
-Tables=348, estimated rows=891234567, table segment GB=2430.77, tables without PK/UK=12
+- Tables: 348
+- Estimated rows: 891234567
+- Table segment GB: 2430.77
+- Tables without PK/UK: 12
 
 GoldenGate Hub baseline recommendation
 ======================================
-Recommended starting tier: Medium (selected from peak hourly redo and table count; when signals straddle tiers, choose the larger tier).
-Baseline resources: vCPU=16, RAM=128 GB, OS/software disk=100 GB, trail/working disk guide=500 GB, calculated trail storage for retention=13423 GB. Use the larger of the guide value and calculated requirement.
-I/O and network guide: disk=SSD, 3,000 IOPS, 300 MB/s, network minimum=1 GbE.
+Recommended starting tier: Medium
+- Basis: selected from peak hourly redo and table count.
+- Rule: when sizing signals straddle tiers, choose the larger tier.
+- vCPU: 16
+- RAM: 128 GB
+- OS/software disk: 100 GB
+- Trail/working disk guide: 500 GB
+- Calculated trail storage for retention: 13423 GB
+- Storage rule: use the larger of the guide value and calculated requirement.
+- Disk guide: SSD, 3,000 IOPS, 300 MB/s
+- Network minimum: 1 GbE
 
 Process-count starting point
 ============================
-Integrated Extract=1-2, Distribution Paths=2-4, Parallel Replicat=1-2, Max concurrent GG processes=8-14.
+- Integrated Extract: 1-2
+- Distribution Paths: 2-4
+- Parallel Replicat groups: 1-2
+- Max concurrent GoldenGate processes: 8-14
 
 Process and recovery sizing prompts
 ===================================
 PDB scope for Extract planning: 1 PDB(s) in scope.
-Integrated Extract calculation: start with 1 Extract group(s). Rule of thumb: one Integrated Extract per source database or per source PDB in scope; do not split one PDB redo stream unless a design review confirms table-group partitioning is needed. Tier guide=1-2.
-Parallel Replicat thread calculation: start MAX_APPLY_PARALLELISM around 8 and MIN_APPLY_PARALLELISM around 2. This uses roughly half of baseline vCPU for MAX and one quarter of MAX for MIN; increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependency behavior.
-Cache Manager / bounded recovery planning: peak redo=186.42 GB/hour. Starting CACHEMGR review point=47 GB, based on about 15 minutes of peak redo and capped at 64 GB for an initial review point. Reserve bounded-recovery/spill headroom of at least 94 GB on fast trail storage, then validate with long-running transactions and CACHEMGR spill statistics.
+- Starting Extract groups: 1
+- Extract rule: one Integrated Extract per source database or per source PDB in scope.
+- Design review: do not split one PDB redo stream unless table-group partitioning is confirmed.
+- Tier guide: 1-2
+- MAX_APPLY_PARALLELISM starting point: 8
+- MIN_APPLY_PARALLELISM starting point: 2
+- Thread rule: MAX is roughly half of baseline vCPU; MIN is roughly one quarter of MAX.
+- Tuning note: increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependencies.
+- Peak redo basis: 186.42 GB/hour
+- CACHEMGR review point: 47 GB
+- CACHEMGR rule: about 15 minutes of peak redo, capped at 64 GB for an initial review point.
+- Bounded recovery / spill headroom: at least 94 GB on fast trail storage
+- Validation: test long-running transactions and review CACHEMGR spill statistics.
 
 Validation requirements before production
 =========================================

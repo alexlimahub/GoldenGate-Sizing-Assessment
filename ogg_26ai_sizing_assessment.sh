@@ -466,14 +466,26 @@ segments as (
      and segment_type in ('TABLE','TABLE PARTITION','TABLE SUBPARTITION')
    group by owner, segment_name
 )
-select 'Tables=' || count(*) ||
-       ', estimated rows=' || nvl(to_char(sum(nvl(t.num_rows, 0))), '0') ||
-       ', table segment GB=' || nvl(to_char(round(sum(nvl(s.segment_gb, 0)), 2)), '0') ||
-       ', tables without PK/UK=' ||
+select '- Tables: ' || count(*)
+  from dba_tables t
+ where t.owner like upper('&owner_like')
+   and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+union all
+select '- Estimated rows: ' || nvl(to_char(sum(nvl(t.num_rows, 0))), '0')
+  from dba_tables t
+ where t.owner like upper('&owner_like')
+   and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+union all
+select '- Table segment GB: ' || nvl(to_char(round(sum(nvl(s.segment_gb, 0)), 2)), '0')
+  from dba_tables t
+  left join segments s on s.owner = t.owner and s.table_name = t.table_name
+ where t.owner like upper('&owner_like')
+   and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+union all
+select '- Tables without PK/UK: ' ||
        nvl(to_char(sum(case when nvl(k.has_pk, 0) = 0 and nvl(k.has_uk, 0) = 0 then 1 else 0 end)), '0')
   from dba_tables t
   left join table_keys k on k.owner = t.owner and k.table_name = t.table_name
-  left join segments s on s.owner = t.owner and s.table_name = t.table_name
  where t.owner like upper('&owner_like')
    and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS');
 prompt
@@ -492,9 +504,10 @@ with table_scope as (
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
 )
 select 'Recommended starting tier: ' ||
-       case score when 1 then 'Small' when 2 then 'Medium' when 3 then 'Large' else 'Custom' end ||
-       ' (low confidence; selected from table count only because redo/change history is not gathered in Autonomous mode).'
+       case score when 1 then 'Small' when 2 then 'Medium' when 3 then 'Large' else 'Custom' end
   from table_scope;
+prompt - Confidence: low until workload metrics are supplied.
+prompt - Basis: selected from table count only because redo/change history is not gathered in Autonomous mode.
 with table_scope as (
   select case
            when count(*) < 100 then 1
@@ -506,18 +519,18 @@ with table_scope as (
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
 )
-select 'Baseline resources: vCPU=' ||
-       case score when 1 then '8' when 2 then '16' when 3 then '32' else 'Custom sizing required' end ||
-       ', RAM=' ||
-       case score when 1 then '64 GB' when 2 then '128 GB' when 3 then '256 GB' else 'Custom sizing required' end ||
-       ', trail/working disk guide=' ||
-       case score when 1 then '200 GB' when 2 then '500 GB' when 3 then '1-2 TB' else 'Custom sizing required' end ||
-       '. Replace this baseline after reviewing ADB workload metrics and GoldenGate throughput.'
-  from table_scope;
+select '- vCPU: ' || case score when 1 then '8' when 2 then '16' when 3 then '32' else 'Custom sizing required' end from table_scope
+union all
+select '- RAM: ' || case score when 1 then '64 GB' when 2 then '128 GB' when 3 then '256 GB' else 'Custom sizing required' end from table_scope
+union all
+select '- Trail/working disk guide: ' || case score when 1 then '200 GB' when 2 then '500 GB' when 3 then '1-2 TB' else 'Custom sizing required' end from table_scope
+union all
+select '- Next step: replace this baseline after reviewing ADB workload metrics and GoldenGate throughput.' from table_scope;
 prompt
 prompt Process and recovery sizing prompts
 prompt ===================================
-prompt PDB scope for Extract planning: Autonomous Database service connection; PDB count is not exposed as a host/container sizing input in this mode.
+prompt - PDB scope: Autonomous Database service connection.
+prompt - PDB count: not exposed as a host/container sizing input in this mode.
 with table_scope as (
   select case
            when count(*) < 100 then 1
@@ -529,8 +542,12 @@ with table_scope as (
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
 )
-select 'Integrated Extract calculation: start with 1 Extract path for this ADB source service, then reassess after reviewing GoldenGate capture throughput and ADB workload metrics. Table-count tier guide=' ||
-       case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else 'custom design review' end || '.'
+select '- Starting Extract paths: 1 for this ADB source service' from table_scope
+union all
+select '- Reassess using GoldenGate capture throughput and ADB workload metrics.' from table_scope
+union all
+select '- Table-count tier guide: ' ||
+       case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else 'custom design review' end
   from table_scope;
 with table_scope as (
   select case
@@ -543,13 +560,19 @@ with table_scope as (
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
 )
-select 'Parallel Replicat thread calculation: low-confidence starting MAX_APPLY_PARALLELISM=' ||
-       case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end ||
-       ', MIN_APPLY_PARALLELISM=' ||
-       case score when 1 then '1' when 2 then '2' when 3 then '4' else 'custom' end ||
-       '. Replace after reviewing target apply capacity, ADB service metrics, and GoldenGate lag.'
-  from table_scope;
-prompt Cache Manager / bounded recovery planning: Autonomous mode does not gather redo history. Use ADB change volume or GoldenGate Extract throughput to size CACHEMGR and bounded-recovery spill headroom; validate with long-running transactions and CACHEMGR spill statistics.
+select '- MAX_APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end
+  from table_scope
+union all
+select '- MIN_APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '1' when 2 then '2' when 3 then '4' else 'custom' end
+  from table_scope
+union all
+select '- Replace after reviewing target apply capacity, ADB service metrics, and GoldenGate lag.' from table_scope;
+prompt - Cache Manager: Autonomous mode does not gather redo history.
+prompt - CACHEMGR input: use ADB change volume or GoldenGate Extract throughput.
+prompt - Bounded recovery: size spill headroom from workload metrics and validate with long-running transactions.
+prompt - Validation: review CACHEMGR spill statistics during workload testing.
 prompt
 prompt Missing inputs before final sizing
 prompt ==================================
@@ -1152,12 +1175,15 @@ daily_agg as (
   select max(redo_gb) as peak_daily_gb
     from daily
 )
-select 'Archived-log workload source: peak hourly=' || nvl(to_char(h.peak_hourly_gb), '0') ||
-       ' GB/hour, average hourly=' || nvl(to_char(h.avg_hourly_gb), '0') ||
-       ' GB/hour, peak daily=' || nvl(to_char(d.peak_daily_gb), '0') || ' GB/day.'
+select '- Archived-log peak hourly: ' || nvl(to_char(h.peak_hourly_gb), '0') || ' GB/hour'
+  from hourly_agg h cross join daily_agg d
+union all
+select '- Archived-log average hourly: ' || nvl(to_char(h.avg_hourly_gb), '0') || ' GB/hour'
+  from hourly_agg h cross join daily_agg d
+union all
+select '- Archived-log peak daily: ' || nvl(to_char(d.peak_daily_gb), '0') || ' GB/day'
   from hourly_agg h cross join daily_agg d;
-select 'Note: archived-log workload is a practical database-level fallback. If only selected PDBs or schemas are replicated, it may overstate GoldenGate workload.'
-  from dual;
+prompt - Note: archived logs are a database-level fallback and may overstate selected-PDB/schema scope.
 prompt
 prompt Replication object scope
 prompt ========================
@@ -1179,14 +1205,26 @@ segments as (
      and segment_type in ('TABLE','TABLE PARTITION','TABLE SUBPARTITION')
    group by owner, segment_name
 )
-select 'Tables=' || count(*) ||
-       ', estimated rows=' || nvl(to_char(sum(nvl(t.num_rows, 0))), '0') ||
-       ', table segment GB=' || nvl(to_char(round(sum(nvl(s.segment_gb, 0)), 2)), '0') ||
-       ', tables without PK/UK=' ||
-       sum(case when nvl(k.has_pk, 0) = 0 and nvl(k.has_uk, 0) = 0 then 1 else 0 end)
+select '- Tables: ' || count(*)
+  from dba_tables t
+ where t.owner like upper('&owner_like')
+   and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+union all
+select '- Estimated rows: ' || nvl(to_char(sum(nvl(t.num_rows, 0))), '0')
+  from dba_tables t
+ where t.owner like upper('&owner_like')
+   and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+union all
+select '- Table segment GB: ' || nvl(to_char(round(sum(nvl(s.segment_gb, 0)), 2)), '0')
+  from dba_tables t
+  left join segments s on s.owner = t.owner and s.table_name = t.table_name
+ where t.owner like upper('&owner_like')
+   and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+union all
+select '- Tables without PK/UK: ' ||
+       nvl(to_char(sum(case when nvl(k.has_pk, 0) = 0 and nvl(k.has_uk, 0) = 0 then 1 else 0 end)), '0')
   from dba_tables t
   left join table_keys k on k.owner = t.owner and k.table_name = t.table_name
-  left join segments s on s.owner = t.owner and s.table_name = t.table_name
  where t.owner like upper('&owner_like')
    and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS');
 prompt
@@ -1231,9 +1269,10 @@ recommendation as (
     from redo_score r cross join table_scope t
 )
 select 'Recommended starting tier: ' ||
-       case score when 1 then 'Small' when 2 then 'Medium' when 3 then 'Large' else 'X-Large' end ||
-       ' (selected from peak hourly redo and table count; when signals straddle tiers, choose the larger tier).'
+       case score when 1 then 'Small' when 2 then 'Medium' when 3 then 'Large' else 'X-Large' end
   from recommendation;
+prompt - Basis: selected from peak hourly redo and table count.
+prompt - Rule: when sizing signals straddle tiers, choose the larger tier.
 with hourly as (
   select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
     from v$archived_log
@@ -1267,16 +1306,17 @@ recommendation as (
          ceil(r.peak_redo_gb_per_hour * to_number('&trail_retention_hours') * 1.5) as formula_trail_gb
     from redo_score r cross join table_scope t
 )
-select 'Baseline resources: vCPU=' ||
-       case score when 1 then '8' when 2 then '16' when 3 then '32' else '64-128' end ||
-       ', RAM=' ||
-       case score when 1 then '64 GB' when 2 then '128 GB' when 3 then '256 GB' else '512 GB' end ||
-       ', OS/software disk=' ||
-       case score when 1 then '50 GB' else '100 GB' end ||
-       ', trail/working disk guide=' ||
-       case score when 1 then '200 GB' when 2 then '500 GB' when 3 then '1-2 TB' else '2-5 TB' end ||
-       ', calculated trail storage for retention=' || formula_trail_gb || ' GB. Use the larger of the guide value and calculated requirement.'
-  from recommendation;
+select '- vCPU: ' || case score when 1 then '8' when 2 then '16' when 3 then '32' else '64-128' end from recommendation
+union all
+select '- RAM: ' || case score when 1 then '64 GB' when 2 then '128 GB' when 3 then '256 GB' else '512 GB' end from recommendation
+union all
+select '- OS/software disk: ' || case score when 1 then '50 GB' else '100 GB' end from recommendation
+union all
+select '- Trail/working disk guide: ' || case score when 1 then '200 GB' when 2 then '500 GB' when 3 then '1-2 TB' else '2-5 TB' end from recommendation
+union all
+select '- Calculated trail storage for retention: ' || formula_trail_gb || ' GB' from recommendation
+union all
+select '- Storage rule: use the larger of the guide value and calculated requirement.' from recommendation;
 with hourly as (
   select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
     from v$archived_log
@@ -1308,14 +1348,16 @@ recommendation as (
   select greatest(r.score, t.score) as score
     from redo_score r cross join table_scope t
 )
-select 'I/O and network guide: disk=' ||
+select '- Disk guide: ' ||
        case score when 1 then 'SSD, 1,000 IOPS, 100 MB/s'
                   when 2 then 'SSD, 3,000 IOPS, 300 MB/s'
                   when 3 then 'NVMe SSD, 10,000 IOPS, 1 GB/s'
                   else 'NVMe SSD, 30,000+ IOPS, 3 GB/s'
-       end ||
-       ', network minimum=' ||
-       case score when 1 then '1 GbE' when 2 then '1 GbE' when 3 then '10 GbE' else '10-25 GbE' end || '.'
+       end
+  from recommendation
+union all
+select '- Network minimum: ' ||
+       case score when 1 then '1 GbE' when 2 then '1 GbE' when 3 then '10 GbE' else '10-25 GbE' end
   from recommendation;
 prompt
 prompt Process-count starting point
@@ -1351,15 +1393,13 @@ recommendation as (
   select greatest(r.score, t.score) as score
     from redo_score r cross join table_scope t
 )
-select 'Integrated Extract=' ||
-       case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else '2-4' end ||
-       ', Distribution Paths=' ||
-       case score when 1 then '1-2' when 2 then '2-4' when 3 then '4-8' else '8-16' end ||
-       ', Parallel Replicat=' ||
-       case score when 1 then '1' when 2 then '1-2' when 3 then '2-4' else '4-8' end ||
-       ', Max concurrent GG processes=' ||
-       case score when 1 then '4-6' when 2 then '8-14' when 3 then '16-34' else '36-70' end || '.'
-  from recommendation;
+select '- Integrated Extract: ' || case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else '2-4' end from recommendation
+union all
+select '- Distribution Paths: ' || case score when 1 then '1-2' when 2 then '2-4' when 3 then '4-8' else '8-16' end from recommendation
+union all
+select '- Parallel Replicat groups: ' || case score when 1 then '1' when 2 then '1-2' when 3 then '2-4' else '4-8' end from recommendation
+union all
+select '- Max concurrent GoldenGate processes: ' || case score when 1 then '4-6' when 2 then '8-14' when 3 then '16-34' else '36-70' end from recommendation;
 prompt
 prompt Process and recovery sizing prompts
 prompt ===================================
@@ -1428,14 +1468,18 @@ recommendation as (
          p.pdbs_in_scope
     from redo_score r cross join table_scope t cross join pdb_scope p
 )
-select 'Integrated Extract calculation: start with ' ||
+select '- Starting Extract groups: ' ||
        case
          when cdb = 'YES' then to_char(greatest(1, pdbs_in_scope))
          else '1'
-       end ||
-       ' Extract group(s). Rule of thumb: one Integrated Extract per source database or per source PDB in scope; do not split one PDB redo stream unless a design review confirms table-group partitioning is needed. Tier guide=' ||
-       case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else '2-4' end || '.'
-  from recommendation;
+       end
+  from recommendation
+union all
+select '- Extract rule: one Integrated Extract per source database or per source PDB in scope.' from recommendation
+union all
+select '- Design review: do not split one PDB redo stream unless table-group partitioning is confirmed.' from recommendation
+union all
+select '- Tier guide: ' || case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else '2-4' end from recommendation;
 with hourly as (
   select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
     from v$archived_log
@@ -1467,12 +1511,17 @@ recommendation as (
   select greatest(r.score, t.score) as score
     from redo_score r cross join table_scope t
 )
-select 'Parallel Replicat thread calculation: start MAX_APPLY_PARALLELISM around ' ||
-       case score when 1 then '4' when 2 then '8' when 3 then '16' else '32' end ||
-       ' and MIN_APPLY_PARALLELISM around ' ||
-       case score when 1 then '1' when 2 then '2' when 3 then '4' else '8' end ||
-       '. This uses roughly half of baseline vCPU for MAX and one quarter of MAX for MIN; increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependency behavior.'
-  from recommendation;
+select '- MAX_APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else '32' end
+  from recommendation
+union all
+select '- MIN_APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '1' when 2 then '2' when 3 then '4' else '8' end
+  from recommendation
+union all
+select '- Thread rule: MAX is roughly half of baseline vCPU; MIN is roughly one quarter of MAX.' from recommendation
+union all
+select '- Tuning note: increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependencies.' from recommendation;
 with hourly as (
   select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
     from v$archived_log
@@ -1484,14 +1533,19 @@ redo_peak as (
   select nvl(max(redo_gb), 0) as peak_redo_gb_per_hour
     from hourly
 )
-select 'Cache Manager / bounded recovery planning: peak redo=' ||
-       round(peak_redo_gb_per_hour, 3) ||
-       ' GB/hour. Starting CACHEMGR review point=' ||
+select '- Peak redo basis: ' || round(peak_redo_gb_per_hour, 3) || ' GB/hour' from redo_peak
+union all
+select '- CACHEMGR review point: ' ||
        greatest(8, least(64, ceil(peak_redo_gb_per_hour * 0.25))) ||
-       ' GB, based on about 15 minutes of peak redo and capped at 64 GB for an initial review point. Reserve bounded-recovery/spill headroom of at least ' ||
+       ' GB' from redo_peak
+union all
+select '- CACHEMGR rule: about 15 minutes of peak redo, capped at 64 GB for an initial review point.' from redo_peak
+union all
+select '- Bounded recovery / spill headroom: at least ' ||
        greatest(20, ceil(peak_redo_gb_per_hour * 0.5)) ||
-       ' GB on fast trail storage, then validate with long-running transactions and CACHEMGR spill statistics.'
-  from redo_peak;
+       ' GB on fast trail storage' from redo_peak
+union all
+select '- Validation: test long-running transactions and review CACHEMGR spill statistics.' from redo_peak;
 prompt
 prompt Validation requirements before production
 prompt =========================================
