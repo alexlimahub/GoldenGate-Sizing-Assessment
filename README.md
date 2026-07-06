@@ -118,7 +118,8 @@ The text report includes:
 - replicated object scope summary
 - recommended starting Hub tier
 - starting vCPU, RAM, trail storage, I/O, network, and process-count guidance
-- Extract count, Parallel Replicat thread, and Cache Manager / bounded recovery planning prompts
+- Extract count and Cache Manager / bounded recovery planning prompts
+- a dedicated Parallel Replicat section with starting guidance for `MAP_PARALLELISM`, `MIN_APPLY_PARALLELISM`, `MAX_APPLY_PARALLELISM`, `APPLY_PARALLELISM`, `SPLIT_TRANS_RECS`, `COMMIT_SERIALIZATION`, `LOOK_AHEAD_TRANSACTIONS`, and `CHUNK_SIZE`
 
 ## Sizing Method
 
@@ -135,8 +136,15 @@ The report also shows the guide-level trail disk baseline for the selected tier.
 The process and recovery prompts are starting points:
 
 - Integrated Extract guidance starts with one Extract per source database or per source PDB in scope.
-- Parallel Replicat guidance starts `MAX_APPLY_PARALLELISM` near half of baseline vCPU and `MIN_APPLY_PARALLELISM` near one quarter of max.
 - Cache Manager guidance uses peak redo to estimate an initial `CACHEMGR` review point and bounded-recovery/spill headroom. Validate this with long-running transactions and actual `CACHEMGR` spill statistics.
+
+Parallel Replicat guidance is reported in its own section so customers can distinguish apply-thread planning from Extract and recovery sizing. It uses the basic Oracle Parallel Replicat parameters documented here:
+
+```text
+https://docs.oracle.com/en/middleware/goldengate/core/21.3/coredoc/replicat-basic-parameters-parallel-replicat.html
+```
+
+The script recommends auto-tuned apply parallelism with `MIN_APPLY_PARALLELISM` and `MAX_APPLY_PARALLELISM` as the starting point. If a customer prefers fixed apply parallelism, use `APPLY_PARALLELISM` instead and do not set it together with `MIN_APPLY_PARALLELISM` / `MAX_APPLY_PARALLELISM`.
 
 ## Important Disclaimer
 

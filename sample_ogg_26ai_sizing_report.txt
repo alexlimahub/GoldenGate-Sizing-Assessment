@@ -72,15 +72,27 @@ PDB scope for Extract planning: 1 PDB(s) in scope.
 - Extract rule: one Integrated Extract per source database or per source PDB in scope.
 - Design review: do not split one PDB redo stream unless table-group partitioning is confirmed.
 - Tier guide: 1
-- MAX_APPLY_PARALLELISM starting point: 4
-- MIN_APPLY_PARALLELISM starting point: 1
-- Thread rule: MAX is roughly half of baseline vCPU; MIN is roughly one quarter of MAX.
-- Tuning note: increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependencies.
 - Peak redo basis: .219 GB/hour
 - CACHEMGR review point: 8 GB
 - CACHEMGR rule: about 15 minutes of peak redo, capped at 64 GB for an initial review point.
 - Bounded recovery / spill headroom: at least 20 GB on fast trail storage
 - Validation: test long-running transactions and review CACHEMGR spill statistics.
+
+Parallel Replicat starting parameters
+======================================
+Use this section to start the target apply design. Validate with target database capacity,
+transaction dependencies, constraints, indexes, triggers, and representative workload.
+Oracle reference: https://docs.oracle.com/en/middleware/goldengate/core/21.3/coredoc/replicat-basic-parameters-parallel-replicat.html
+- MAP_PARALLELISM starting point: 2 mapper thread(s). Default is 2; valid documented range is 1-100.
+- Auto-tuned apply mode: use MIN_APPLY_PARALLELISM and MAX_APPLY_PARALLELISM together.
+- MIN_APPLY_PARALLELISM starting point: 1
+- MAX_APPLY_PARALLELISM starting point: 4
+- Fixed apply mode alternative: APPLY_PARALLELISM starting point: 4. Use only if you do not use MIN/MAX apply parallelism.
+- SPLIT_TRANS_RECS: leave disabled initially; consider only for large transactions after dependency and recovery testing.
+- COMMIT_SERIALIZATION: use FULL only when target commit order must be forced; validate throughput impact.
+- LOOK_AHEAD_TRANSACTIONS: keep the default starting point unless scheduling tests show a bottleneck.
+- CHUNK_SIZE: keep the default starting point; increasing it can consume more Replicat memory.
+- Tuning note: increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependencies.
 
 Validation requirements before production
 =========================================

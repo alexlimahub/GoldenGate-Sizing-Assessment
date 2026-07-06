@@ -549,6 +549,16 @@ union all
 select '- Table-count tier guide: ' ||
        case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else 'custom design review' end
   from table_scope;
+prompt - Cache Manager: Autonomous mode does not gather redo history.
+prompt - CACHEMGR input: use ADB change volume or GoldenGate Extract throughput.
+prompt - Bounded recovery: size spill headroom from workload metrics and validate with long-running transactions.
+prompt - Validation: review CACHEMGR spill statistics during workload testing.
+prompt
+prompt Parallel Replicat starting parameters
+prompt ======================================
+prompt Use this section to start the target apply design. Validate with target database capacity,
+prompt transaction dependencies, constraints, indexes, triggers, and representative workload.
+prompt Oracle reference: https://docs.oracle.com/en/middleware/goldengate/core/21.3/coredoc/replicat-basic-parameters-parallel-replicat.html
 with table_scope as (
   select case
            when count(*) < 100 then 1
@@ -560,19 +570,35 @@ with table_scope as (
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
 )
-select '- MAX_APPLY_PARALLELISM starting point: ' ||
-       case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end
+select '- MAP_PARALLELISM starting point: ' ||
+       case score when 1 then '2' when 2 then '3' when 3 then '4' else 'custom' end ||
+       ' mapper thread(s). Default is 2; valid documented range is 1-100.'
   from table_scope
+union all
+select '- Auto-tuned apply mode: use MIN_APPLY_PARALLELISM and MAX_APPLY_PARALLELISM together.' from table_scope
 union all
 select '- MIN_APPLY_PARALLELISM starting point: ' ||
        case score when 1 then '1' when 2 then '2' when 3 then '4' else 'custom' end
   from table_scope
 union all
+select '- MAX_APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end
+  from table_scope
+union all
+select '- Fixed apply mode alternative: APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end ||
+       '. Use only if you do not use MIN/MAX apply parallelism.'
+  from table_scope
+union all
+select '- SPLIT_TRANS_RECS: leave disabled initially; consider only for large transactions after dependency and recovery testing.' from table_scope
+union all
+select '- COMMIT_SERIALIZATION: use FULL only when target commit order must be forced; validate throughput impact.' from table_scope
+union all
+select '- LOOK_AHEAD_TRANSACTIONS: keep the default starting point unless scheduling tests show a bottleneck.' from table_scope
+union all
+select '- CHUNK_SIZE: keep the default starting point; increasing it can consume more Replicat memory.' from table_scope
+union all
 select '- Replace after reviewing target apply capacity, ADB service metrics, and GoldenGate lag.' from table_scope;
-prompt - Cache Manager: Autonomous mode does not gather redo history.
-prompt - CACHEMGR input: use ADB change volume or GoldenGate Extract throughput.
-prompt - Bounded recovery: size spill headroom from workload metrics and validate with long-running transactions.
-prompt - Validation: review CACHEMGR spill statistics during workload testing.
 prompt
 prompt Missing inputs before final sizing
 prompt ==================================
@@ -1487,6 +1513,36 @@ with hourly as (
      and standby_dest = 'NO'
    group by trunc(first_time, 'HH24')
 ),
+redo_peak as (
+  select nvl(max(redo_gb), 0) as peak_redo_gb_per_hour
+    from hourly
+)
+select '- Peak redo basis: ' || round(peak_redo_gb_per_hour, 3) || ' GB/hour' from redo_peak
+union all
+select '- CACHEMGR review point: ' ||
+       greatest(8, least(64, ceil(peak_redo_gb_per_hour * 0.25))) ||
+       ' GB' from redo_peak
+union all
+select '- CACHEMGR rule: about 15 minutes of peak redo, capped at 64 GB for an initial review point.' from redo_peak
+union all
+select '- Bounded recovery / spill headroom: at least ' ||
+       greatest(20, ceil(peak_redo_gb_per_hour * 0.5)) ||
+       ' GB on fast trail storage' from redo_peak
+union all
+select '- Validation: test long-running transactions and review CACHEMGR spill statistics.' from redo_peak;
+prompt
+prompt Parallel Replicat starting parameters
+prompt ======================================
+prompt Use this section to start the target apply design. Validate with target database capacity,
+prompt transaction dependencies, constraints, indexes, triggers, and representative workload.
+prompt Oracle reference: https://docs.oracle.com/en/middleware/goldengate/core/21.3/coredoc/replicat-basic-parameters-parallel-replicat.html
+with hourly as (
+  select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
+    from v$archived_log
+   where first_time >= sysdate - 7
+     and standby_dest = 'NO'
+   group by trunc(first_time, 'HH24')
+),
 redo_score as (
   select case
            when nvl(max(redo_gb), 0) < 1 then 1
@@ -1511,41 +1567,35 @@ recommendation as (
   select greatest(r.score, t.score) as score
     from redo_score r cross join table_scope t
 )
-select '- MAX_APPLY_PARALLELISM starting point: ' ||
-       case score when 1 then '4' when 2 then '8' when 3 then '16' else '32' end
+select '- MAP_PARALLELISM starting point: ' ||
+       case score when 1 then '2' when 2 then '3' when 3 then '4' else '6' end ||
+       ' mapper thread(s). Default is 2; valid documented range is 1-100.'
   from recommendation
+union all
+select '- Auto-tuned apply mode: use MIN_APPLY_PARALLELISM and MAX_APPLY_PARALLELISM together.' from recommendation
 union all
 select '- MIN_APPLY_PARALLELISM starting point: ' ||
        case score when 1 then '1' when 2 then '2' when 3 then '4' else '8' end
   from recommendation
 union all
-select '- Thread rule: MAX is roughly half of baseline vCPU; MIN is roughly one quarter of MAX.' from recommendation
+select '- MAX_APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else '32' end
+  from recommendation
+union all
+select '- Fixed apply mode alternative: APPLY_PARALLELISM starting point: ' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else '32' end ||
+       '. Use only if you do not use MIN/MAX apply parallelism.'
+  from recommendation
+union all
+select '- SPLIT_TRANS_RECS: leave disabled initially; consider only for large transactions after dependency and recovery testing.' from recommendation
+union all
+select '- COMMIT_SERIALIZATION: use FULL only when target commit order must be forced; validate throughput impact.' from recommendation
+union all
+select '- LOOK_AHEAD_TRANSACTIONS: keep the default starting point unless scheduling tests show a bottleneck.' from recommendation
+union all
+select '- CHUNK_SIZE: keep the default starting point; increasing it can consume more Replicat memory.' from recommendation
 union all
 select '- Tuning note: increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependencies.' from recommendation;
-with hourly as (
-  select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
-    from v$archived_log
-   where first_time >= sysdate - 7
-     and standby_dest = 'NO'
-   group by trunc(first_time, 'HH24')
-),
-redo_peak as (
-  select nvl(max(redo_gb), 0) as peak_redo_gb_per_hour
-    from hourly
-)
-select '- Peak redo basis: ' || round(peak_redo_gb_per_hour, 3) || ' GB/hour' from redo_peak
-union all
-select '- CACHEMGR review point: ' ||
-       greatest(8, least(64, ceil(peak_redo_gb_per_hour * 0.25))) ||
-       ' GB' from redo_peak
-union all
-select '- CACHEMGR rule: about 15 minutes of peak redo, capped at 64 GB for an initial review point.' from redo_peak
-union all
-select '- Bounded recovery / spill headroom: at least ' ||
-       greatest(20, ceil(peak_redo_gb_per_hour * 0.5)) ||
-       ' GB on fast trail storage' from redo_peak
-union all
-select '- Validation: test long-running transactions and review CACHEMGR spill statistics.' from redo_peak;
 prompt
 prompt Validation requirements before production
 prompt =========================================
