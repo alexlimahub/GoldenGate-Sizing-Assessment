@@ -1,0 +1,61 @@
+Oracle GoldenGate 26ai Hub Sizing Baseline Report
+=================================================
+
+This report is a first-pass sizing baseline for self-managed Oracle GoldenGate 26ai Microservices deployments.
+It is not a performance guarantee and is not a substitute for a proof of concept, workload replay,
+operational monitoring, or validation with production-representative workload before go-live.
+
+Scope filters used by assessment
+===============================
+Schema LIKE filter: APP%
+PDB LIKE filter: APP_PDB
+Trail retention hours: 48
+
+Database inventory
+==================
+Database: PRODDB / DB_UNIQUE_NAME: prod_db01 / Role: PRIMARY / Platform: Linux x86 64-bit
+Version: 19.24.0.0.0 (within Oracle Database 19c+ baseline for this GoldenGate sizing assessment)
+CDB: YES / LOG_MODE: ARCHIVELOG / FORCE_LOGGING: YES / MIN_SUPPLEMENTAL_LOGGING: YES / PK_SUPPLEMENTAL_LOGGING: NO / UI_SUPPLEMENTAL_LOGGING: NO
+
+Readiness checks
+================
+PASS: ARCHIVELOG is enabled.
+PASS: Minimal supplemental logging is enabled.
+PASS: FORCE LOGGING is enabled.
+REVIEW: Tables without enabled primary key or unique key: 12
+REVIEW: Objects where DBA_GOLDENGATE_SUPPORT_MODE is not FULL: 3
+REVIEW: Columns requiring GoldenGate datatype or object-shape review: 27
+
+Workload summary
+================
+Archived-log workload source: peak hourly=186.42 GB/hour, average hourly=74.381 GB/hour, peak daily=1368.92 GB/day.
+Note: archived-log workload is a practical database-level fallback. If only selected PDBs or schemas are replicated, it may overstate GoldenGate workload.
+
+Replication object scope
+========================
+Tables=348, estimated rows=891234567, table segment GB=2430.77, tables without PK/UK=12
+
+GoldenGate Hub baseline recommendation
+======================================
+Recommended starting tier: Medium (selected from peak hourly redo and table count; when signals straddle tiers, choose the larger tier).
+Baseline resources: vCPU=16, RAM=128 GB, OS/software disk=100 GB, trail/working disk guide=500 GB, calculated trail storage for retention=13423 GB. Use the larger of the guide value and calculated requirement.
+I/O and network guide: disk=SSD, 3,000 IOPS, 300 MB/s, network minimum=1 GbE.
+
+Process-count starting point
+============================
+Integrated Extract=1-2, Distribution Paths=2-4, Parallel Replicat=1-2, Max concurrent GG processes=8-14.
+
+Validation requirements before production
+=========================================
+Validate this baseline with production-representative workload before go-live.
+During validation, monitor Extract lag, Replicat lag, CPU utilization, CACHEMGR spill,
+trail backlog growth, trail filesystem utilization, swap activity, and process restarts.
+A generally healthy starting target is Extract lag below 5 seconds, Replicat lag below 10 seconds,
+sustained CPU below 70 percent, trail filesystem below 70 percent, minimal CACHEMGR spill,
+and no recurring resource-related GoldenGate abends.
+
+Files generated
+===============
+/path/to/ogg_sizing_20260706_115300
+
+End of report.
