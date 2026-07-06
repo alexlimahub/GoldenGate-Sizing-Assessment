@@ -7,18 +7,18 @@ operational monitoring, or validation with production-representative workload be
 
 Scope filters used by assessment
 ===============================
-Schema LIKE filter: APP%
-PDB LIKE filter: APP_PDB
-Trail retention hours: 48
+Schema LIKE filter: HR
+PDB LIKE filter: FREEPDB1
+Trail retention hours: 24
 
 Database inventory
 ==================
-Database: PRODDB / DB_UNIQUE_NAME: prod_db01 / Role: PRIMARY / Platform: Linux x86 64-bit
-Version: 19.24.0.0.0 (within Oracle Database 19c+ baseline for this GoldenGate sizing assessment)
+Database: FREE / DB_UNIQUE_NAME: FREE / Role: PRIMARY / Platform: Linux OS (AARCH64)
+Version: 23.26.1.0.0 (within Oracle Database 19c+ baseline for this GoldenGate sizing assessment)
 CDB: YES / LOG_MODE: ARCHIVELOG / FORCE_LOGGING: YES / MIN_SUPPLEMENTAL_LOGGING: YES / PK_SUPPLEMENTAL_LOGGING: NO / UI_SUPPLEMENTAL_LOGGING: NO
 ENABLE_GOLDENGATE_REPLICATION: TRUE
-PDBs in container database: 4
-Current SQL container for object assessment: APP_PDB
+PDBs in container database: 1
+Current SQL container for object assessment: FREEPDB1
 
 Readiness checks
 ================
@@ -26,44 +26,44 @@ PASS: ARCHIVELOG is enabled.
 PASS: Minimal supplemental logging is enabled.
 PASS: FORCE LOGGING is enabled.
 PASS: ENABLE_GOLDENGATE_REPLICATION is TRUE.
-REVIEW: Tables without enabled primary key or unique key: 12
-REVIEW: Objects where DBA_GOLDENGATE_SUPPORT_MODE is not FULL: 3
-REVIEW: Columns requiring GoldenGate datatype or object-shape review: 27
+REVIEW: Tables without enabled primary key or unique key: 7
+REVIEW: Objects where DBA_GOLDENGATE_SUPPORT_MODE is not FULL: 0
+REVIEW: Columns requiring GoldenGate datatype or object-shape review: 7
 
 Workload summary
 ================
-- Archived-log peak hourly: 186.42 GB/hour
-- Archived-log average hourly: 74.381 GB/hour
-- Archived-log peak daily: 1368.92 GB/day
+- Archived-log peak hourly: .219 GB/hour
+- Archived-log average hourly: .163 GB/hour
+- Archived-log peak daily: 1.573 GB/day
 - Note: archived logs are a database-level fallback and may overstate selected-PDB/schema scope.
 
 Replication object scope
 ========================
-- Tables: 348
-- Estimated rows: 891234567
-- Table segment GB: 2430.77
-- Tables without PK/UK: 12
+- Tables: 14
+- Estimated rows: 270686
+- Table segment GB: .01
+- Tables without PK/UK: 7
 
 GoldenGate Hub baseline recommendation
 ======================================
-Recommended starting tier: Medium
+Recommended starting tier: Small
 - Basis: selected from peak hourly redo and table count.
 - Rule: when sizing signals straddle tiers, choose the larger tier.
-- vCPU: 16
-- RAM: 128 GB
-- OS/software disk: 100 GB
-- Trail/working disk guide: 500 GB
-- Calculated trail storage for retention: 13423 GB
+- vCPU: 8
+- RAM: 64 GB
+- OS/software disk: 50 GB
+- Trail/working disk guide: 200 GB
+- Calculated trail storage for retention: 8 GB
 - Storage rule: use the larger of the guide value and calculated requirement.
-- Disk guide: SSD, 3,000 IOPS, 300 MB/s
+- Disk guide: SSD, 1,000 IOPS, 100 MB/s
 - Network minimum: 1 GbE
 
 Process-count starting point
 ============================
-- Integrated Extract: 1-2
-- Distribution Paths: 2-4
-- Parallel Replicat groups: 1-2
-- Max concurrent GoldenGate processes: 8-14
+- Integrated Extract: 1
+- Distribution Paths: 1-2
+- Parallel Replicat groups: 1
+- Max concurrent GoldenGate processes: 4-6
 
 Process and recovery sizing prompts
 ===================================
@@ -71,15 +71,15 @@ PDB scope for Extract planning: 1 PDB(s) in scope.
 - Starting Extract groups: 1
 - Extract rule: one Integrated Extract per source database or per source PDB in scope.
 - Design review: do not split one PDB redo stream unless table-group partitioning is confirmed.
-- Tier guide: 1-2
-- MAX_APPLY_PARALLELISM starting point: 8
-- MIN_APPLY_PARALLELISM starting point: 2
+- Tier guide: 1
+- MAX_APPLY_PARALLELISM starting point: 4
+- MIN_APPLY_PARALLELISM starting point: 1
 - Thread rule: MAX is roughly half of baseline vCPU; MIN is roughly one quarter of MAX.
 - Tuning note: increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependencies.
-- Peak redo basis: 186.42 GB/hour
-- CACHEMGR review point: 47 GB
+- Peak redo basis: .219 GB/hour
+- CACHEMGR review point: 8 GB
 - CACHEMGR rule: about 15 minutes of peak redo, capped at 64 GB for an initial review point.
-- Bounded recovery / spill headroom: at least 94 GB on fast trail storage
+- Bounded recovery / spill headroom: at least 20 GB on fast trail storage
 - Validation: test long-running transactions and review CACHEMGR spill statistics.
 
 Validation requirements before production
@@ -93,6 +93,6 @@ and no recurring resource-related GoldenGate abends.
 
 Files generated
 ===============
-/path/to/ogg_sizing_20260706_115300
+/opt/oracle/ogg_sizing_dbWEST_sample
 
 End of report.
