@@ -361,7 +361,7 @@ set markup csv off
 set heading off
 set feedback off
 set pagesize 0
-set linesize 220
+set linesize 32767
 set trimspool on
 
 spool "&report_file"
@@ -515,6 +515,42 @@ select 'Baseline resources: vCPU=' ||
        '. Replace this baseline after reviewing ADB workload metrics and GoldenGate throughput.'
   from table_scope;
 prompt
+prompt Process and recovery sizing prompts
+prompt ===================================
+prompt PDB scope for Extract planning: Autonomous Database service connection; PDB count is not exposed as a host/container sizing input in this mode.
+with table_scope as (
+  select case
+           when count(*) < 100 then 1
+           when count(*) <= 500 then 2
+           when count(*) <= 2000 then 3
+           else 5
+         end as score
+    from dba_tables
+   where owner like upper('&owner_like')
+     and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+)
+select 'Integrated Extract calculation: start with 1 Extract path for this ADB source service, then reassess after reviewing GoldenGate capture throughput and ADB workload metrics. Table-count tier guide=' ||
+       case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else 'custom design review' end || '.'
+  from table_scope;
+with table_scope as (
+  select case
+           when count(*) < 100 then 1
+           when count(*) <= 500 then 2
+           when count(*) <= 2000 then 3
+           else 5
+         end as score
+    from dba_tables
+   where owner like upper('&owner_like')
+     and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+)
+select 'Parallel Replicat thread calculation: low-confidence starting MAX_APPLY_PARALLELISM=' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end ||
+       ', MIN_APPLY_PARALLELISM=' ||
+       case score when 1 then '1' when 2 then '2' when 3 then '4' else 'custom' end ||
+       '. Replace after reviewing target apply capacity, ADB service metrics, and GoldenGate lag.'
+  from table_scope;
+prompt Cache Manager / bounded recovery planning: Autonomous mode does not gather redo history. Use ADB change volume or GoldenGate Extract throughput to size CACHEMGR and bounded-recovery spill headroom; validate with long-running transactions and CACHEMGR spill statistics.
+prompt
 prompt Missing inputs before final sizing
 prompt ==================================
 prompt Required: peak and average change volume or redo equivalent by hour/day for the ADB workload.
@@ -618,6 +654,10 @@ select d.name as db_name,
        d.supplemental_log_data_ui,
        p.value as block_size,
        g.value as enable_goldengate_replication,
+       case
+         when d.cdb = 'YES' then (select count(*) from v$containers where con_id > 2)
+         else 0
+       end as pdb_count_in_container_db,
        round((select sum(bytes) from dba_data_files) / 1024 / 1024, 2) as db_size_mb,
        systimestamp as captured_at
   from v$database d
@@ -977,7 +1017,7 @@ set markup csv off
 set heading off
 set feedback off
 set pagesize 0
-set linesize 220
+set linesize 32767
 set trimspool on
 
 spool "&report_file"
@@ -1019,6 +1059,12 @@ select 'ENABLE_GOLDENGATE_REPLICATION: ' || nvl((select value
                                                    from v$parameter
                                                   where name = 'enable_goldengate_replication'), 'UNKNOWN')
   from dual;
+select 'PDBs in container database: ' ||
+       case
+         when d.cdb = 'YES' then to_char((select count(*) from v$containers where con_id > 2))
+         else '0 (non-CDB source)'
+       end
+  from v$database d;
 select 'Current SQL container for object assessment: ' || sys_context('USERENV', 'CON_NAME')
   from dual;
 prompt
@@ -1314,6 +1360,138 @@ select 'Integrated Extract=' ||
        ', Max concurrent GG processes=' ||
        case score when 1 then '4-6' when 2 then '8-14' when 3 then '16-34' else '36-70' end || '.'
   from recommendation;
+prompt
+prompt Process and recovery sizing prompts
+prompt ===================================
+with pdb_scope as (
+  select d.cdb,
+         case
+           when d.cdb = 'YES'
+            and upper('&pdb_name_like') not in ('%', 'CDB$ROOT', 'PDB$SEED')
+            and instr('&pdb_name_like', '%') = 0
+           then 1
+           when d.cdb = 'YES'
+           then (select count(*) from v$containers where con_id > 2)
+           else 0
+         end as pdbs_in_scope
+    from v$database d
+)
+select 'PDB scope for Extract planning: ' ||
+       case
+         when cdb = 'YES' then to_char(pdbs_in_scope) || ' PDB(s) in scope.'
+         else 'non-CDB source.'
+       end
+  from pdb_scope;
+with hourly as (
+  select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
+    from v$archived_log
+   where first_time >= sysdate - 7
+     and standby_dest = 'NO'
+   group by trunc(first_time, 'HH24')
+),
+redo_score as (
+  select case
+           when nvl(max(redo_gb), 0) < 1 then 1
+           when nvl(max(redo_gb), 0) <= 500 then 2
+           when nvl(max(redo_gb), 0) <= 1024 then 3
+           else 4
+         end as score
+    from hourly
+),
+table_scope as (
+  select case
+           when count(*) < 100 then 1
+           when count(*) <= 500 then 2
+           when count(*) <= 2000 then 3
+           else 4
+         end as score
+    from dba_tables
+   where owner like upper('&owner_like')
+     and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+),
+pdb_scope as (
+  select d.cdb,
+         case
+           when d.cdb = 'YES'
+            and upper('&pdb_name_like') not in ('%', 'CDB$ROOT', 'PDB$SEED')
+            and instr('&pdb_name_like', '%') = 0
+           then 1
+           when d.cdb = 'YES'
+           then (select count(*) from v$containers where con_id > 2)
+           else 0
+         end as pdbs_in_scope
+    from v$database d
+),
+recommendation as (
+  select greatest(r.score, t.score) as score,
+         p.cdb,
+         p.pdbs_in_scope
+    from redo_score r cross join table_scope t cross join pdb_scope p
+)
+select 'Integrated Extract calculation: start with ' ||
+       case
+         when cdb = 'YES' then to_char(greatest(1, pdbs_in_scope))
+         else '1'
+       end ||
+       ' Extract group(s). Rule of thumb: one Integrated Extract per source database or per source PDB in scope; do not split one PDB redo stream unless a design review confirms table-group partitioning is needed. Tier guide=' ||
+       case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else '2-4' end || '.'
+  from recommendation;
+with hourly as (
+  select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
+    from v$archived_log
+   where first_time >= sysdate - 7
+     and standby_dest = 'NO'
+   group by trunc(first_time, 'HH24')
+),
+redo_score as (
+  select case
+           when nvl(max(redo_gb), 0) < 1 then 1
+           when nvl(max(redo_gb), 0) <= 500 then 2
+           when nvl(max(redo_gb), 0) <= 1024 then 3
+           else 4
+         end as score
+    from hourly
+),
+table_scope as (
+  select case
+           when count(*) < 100 then 1
+           when count(*) <= 500 then 2
+           when count(*) <= 2000 then 3
+           else 4
+         end as score
+    from dba_tables
+   where owner like upper('&owner_like')
+     and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+),
+recommendation as (
+  select greatest(r.score, t.score) as score
+    from redo_score r cross join table_scope t
+)
+select 'Parallel Replicat thread calculation: start MAX_APPLY_PARALLELISM around ' ||
+       case score when 1 then '4' when 2 then '8' when 3 then '16' else '32' end ||
+       ' and MIN_APPLY_PARALLELISM around ' ||
+       case score when 1 then '1' when 2 then '2' when 3 then '4' else '8' end ||
+       '. This uses roughly half of baseline vCPU for MAX and one quarter of MAX for MIN; increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependency behavior.'
+  from recommendation;
+with hourly as (
+  select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
+    from v$archived_log
+   where first_time >= sysdate - 7
+     and standby_dest = 'NO'
+   group by trunc(first_time, 'HH24')
+),
+redo_peak as (
+  select nvl(max(redo_gb), 0) as peak_redo_gb_per_hour
+    from hourly
+)
+select 'Cache Manager / bounded recovery planning: peak redo=' ||
+       round(peak_redo_gb_per_hour, 3) ||
+       ' GB/hour. Starting CACHEMGR review point=' ||
+       greatest(8, least(64, ceil(peak_redo_gb_per_hour * 0.25))) ||
+       ' GB, based on about 15 minutes of peak redo and capped at 64 GB for an initial review point. Reserve bounded-recovery/spill headroom of at least ' ||
+       greatest(20, ceil(peak_redo_gb_per_hour * 0.5)) ||
+       ' GB on fast trail storage, then validate with long-running transactions and CACHEMGR spill statistics.'
+  from redo_peak;
 prompt
 prompt Validation requirements before production
 prompt =========================================

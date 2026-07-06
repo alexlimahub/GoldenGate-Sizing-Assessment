@@ -16,12 +16,16 @@ Database inventory
 Database: PRODDB / DB_UNIQUE_NAME: prod_db01 / Role: PRIMARY / Platform: Linux x86 64-bit
 Version: 19.24.0.0.0 (within Oracle Database 19c+ baseline for this GoldenGate sizing assessment)
 CDB: YES / LOG_MODE: ARCHIVELOG / FORCE_LOGGING: YES / MIN_SUPPLEMENTAL_LOGGING: YES / PK_SUPPLEMENTAL_LOGGING: NO / UI_SUPPLEMENTAL_LOGGING: NO
+ENABLE_GOLDENGATE_REPLICATION: TRUE
+PDBs in container database: 4
+Current SQL container for object assessment: APP_PDB
 
 Readiness checks
 ================
 PASS: ARCHIVELOG is enabled.
 PASS: Minimal supplemental logging is enabled.
 PASS: FORCE LOGGING is enabled.
+PASS: ENABLE_GOLDENGATE_REPLICATION is TRUE.
 REVIEW: Tables without enabled primary key or unique key: 12
 REVIEW: Objects where DBA_GOLDENGATE_SUPPORT_MODE is not FULL: 3
 REVIEW: Columns requiring GoldenGate datatype or object-shape review: 27
@@ -44,6 +48,13 @@ I/O and network guide: disk=SSD, 3,000 IOPS, 300 MB/s, network minimum=1 GbE.
 Process-count starting point
 ============================
 Integrated Extract=1-2, Distribution Paths=2-4, Parallel Replicat=1-2, Max concurrent GG processes=8-14.
+
+Process and recovery sizing prompts
+===================================
+PDB scope for Extract planning: 1 PDB(s) in scope.
+Integrated Extract calculation: start with 1 Extract group(s). Rule of thumb: one Integrated Extract per source database or per source PDB in scope; do not split one PDB redo stream unless a design review confirms table-group partitioning is needed. Tier guide=1-2.
+Parallel Replicat thread calculation: start MAX_APPLY_PARALLELISM around 8 and MIN_APPLY_PARALLELISM around 2. This uses roughly half of baseline vCPU for MAX and one quarter of MAX for MIN; increase gradually while watching apply lag, CPU above 80 percent, target constraints, and transaction dependency behavior.
+Cache Manager / bounded recovery planning: peak redo=186.42 GB/hour. Starting CACHEMGR review point=47 GB, based on about 15 minutes of peak redo and capped at 64 GB for an initial review point. Reserve bounded-recovery/spill headroom of at least 94 GB on fast trail storage, then validate with long-running transactions and CACHEMGR spill statistics.
 
 Validation requirements before production
 =========================================

@@ -110,6 +110,7 @@ The text report includes:
 
 - database version and 19c+ baseline status
 - `ENABLE_GOLDENGATE_REPLICATION` value
+- number of PDBs in the container database
 - ARCHIVELOG, force logging, and supplemental logging checks
 - counts of tables without primary or unique keys
 - counts of objects requiring GoldenGate support review
@@ -117,6 +118,7 @@ The text report includes:
 - replicated object scope summary
 - recommended starting Hub tier
 - starting vCPU, RAM, trail storage, I/O, network, and process-count guidance
+- Extract count, Parallel Replicat thread, and Cache Manager / bounded recovery planning prompts
 
 ## Sizing Method
 
@@ -129,6 +131,12 @@ Peak redo GB per hour x retention hours x 1.5 safety factor
 ```
 
 The report also shows the guide-level trail disk baseline for the selected tier. Use the larger of the calculated trail requirement and the tier baseline.
+
+The process and recovery prompts are starting points:
+
+- Integrated Extract guidance starts with one Extract per source database or per source PDB in scope.
+- Parallel Replicat guidance starts `MAX_APPLY_PARALLELISM` near half of baseline vCPU and `MIN_APPLY_PARALLELISM` near one quarter of max.
+- Cache Manager guidance uses peak redo to estimate an initial `CACHEMGR` review point and bounded-recovery/spill headroom. Validate this with long-running transactions and actual `CACHEMGR` spill statistics.
 
 ## Important Disclaimer
 
