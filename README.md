@@ -11,7 +11,7 @@ ogg_26ai_sizing_assessment.sh
 sample_ogg_26ai_sizing_report.txt
 ```
 
-The script connects through SQL*Plus, gathers Oracle Database metadata and workload signals, writes CSV evidence files, and generates a first-pass GoldenGate Hub sizing baseline report.
+The script connects through SQL*Plus or SQLcl, gathers Oracle Database metadata and workload signals, writes CSV evidence files, and generates a first-pass GoldenGate Hub sizing baseline report.
 
 `sample_ogg_26ai_sizing_report.txt` shows an example of the generated text report format.
 
@@ -27,10 +27,12 @@ Autonomous Database is supported by the same `ogg_26ai_sizing_assessment.sh` scr
 
 - Unix-like shell environment.
 - SQL*Plus available in `PATH`, or set `SQLPLUS_BIN`.
+- SQLcl is also supported; still use `SQLPLUS_BIN` to point to the `sql` executable.
 - Oracle client connectivity to the source database.
 - A database account with read access to required `DBA_*` and `V$` views.
 - Access to `DBA_HIST_CON_SYSSTAT` and `DBA_HIST_SNAPSHOT` if historical PDB redo by hour/day should be gathered.
 - For Autonomous Database: a wallet/TNS connection and a database user with catalog access to the schemas being assessed. Do not use SYSDBA.
+- For Autonomous Database wallets, set `TNS_ADMIN` to the wallet directory or pass `-w /path/to/wallet`.
 
 Typical execution is done by a DBA or assessment user with sufficient catalog privileges.
 
@@ -51,17 +53,26 @@ Run with schema and PDB filters:
 Run against Autonomous Database from a client machine:
 
 ```sh
+./ogg_26ai_sizing_assessment.sh -a -w "/path/to/Wallet_ADB" -c 'admin/password@myadb_high' -s "HR"
+```
+
+Run against Autonomous Database with SQLcl:
+
+```sh
+export SQLPLUS_BIN=/opt/sqlcl/bin/sql
+export TNS_ADMIN=/path/to/Wallet_ADB
 ./ogg_26ai_sizing_assessment.sh -a -c 'admin/password@myadb_high' -s "HR"
 ```
 
 Options:
 
 ```text
--c CONNECT   SQL*Plus connect string. Default: ORACLE_CONNECT or "/ as sysdba"
+-c CONNECT   SQL*Plus/SQLcl connect string. Default: ORACLE_CONNECT or "/ as sysdba"
 -s PATTERN   Schema SQL LIKE filter for replicated objects. Default: %
 -p PATTERN   PDB name or SQL LIKE filter for CDB/PDB redo scope. Default: %
 -r HOURS     Trail retention hours for storage estimate. Default: 24
 -o DIR       Output directory. Default: ogg_sizing_YYYYMMDD_HH24MISS
+-w DIR       ADB wallet directory. Sets TNS_ADMIN for this execution.
 -a           Autonomous Database mode. Use a client/wallet connection; do not use SYSDBA.
 -h           Show help.
 ```
@@ -73,9 +84,22 @@ export ORACLE_CONNECT="/ as sysdba"
 export SQLPLUS_BIN=/path/to/sqlplus
 ```
 
+For SQLcl, keep using `SQLPLUS_BIN`:
+
+```sh
+export SQLPLUS_BIN=/path/to/sql
+```
+
 When `-p` is an exact PDB name, for example `-p "FREEPDB1"`, the script switches the SQL session into that PDB before assessing schema and object metadata. When `-p` contains a wildcard such as `%`, it is used as a filter only.
 
 Autonomous mode does not gather archived-log or host-local metrics. Its report is intentionally lower confidence and asks for ADB workload metrics, GoldenGate throughput, network path, target count, and initial-load details before final sizing.
+
+For Autonomous Database wallet connections, either export `TNS_ADMIN` before running the script or pass the wallet directory with `-w`:
+
+```sh
+export TNS_ADMIN=/path/to/Wallet_ADB
+./ogg_26ai_sizing_assessment.sh -a -c 'admin/password@myadb_high' -s "HR"
+```
 
 ## Output
 
@@ -92,7 +116,7 @@ Self-managed mode creates a timestamped output directory containing:
 - column review CSV
 - supplemental logging CSV
 - GoldenGate support mode CSV
-- SQL*Plus execution log
+- SQL*Plus/SQLcl execution log
 
 Autonomous mode creates a reduced output set focused on:
 
@@ -104,7 +128,7 @@ Autonomous mode creates a reduced output set focused on:
 - column review CSV
 - supplemental logging CSV
 - workload inputs needed CSV
-- SQL*Plus execution log
+- SQL*Plus/SQLcl execution log
 
 The text report includes:
 

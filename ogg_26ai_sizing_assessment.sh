@@ -25,17 +25,19 @@ RETENTION_HOURS=24
 OUTPUT_BASE="ogg_sizing_${RUN_STAMP}"
 SQLPLUS_BIN=${SQLPLUS_BIN:-sqlplus}
 AUTONOMOUS_MODE="N"
+WALLET_DIR=""
 
 usage() {
   cat <<USAGE
 Usage: ${SCRIPT_NAME} [options]
 
 Options:
-  -c CONNECT   SQL*Plus connect string. Default: ORACLE_CONNECT or "/ as sysdba"
+  -c CONNECT   SQL*Plus/SQLcl connect string. Default: ORACLE_CONNECT or "/ as sysdba"
   -s PATTERN   Schema SQL LIKE filter for replicated objects. Default: %
   -p PATTERN   PDB name or SQL LIKE filter for CDB/PDB redo scope. Default: %
   -r HOURS     Trail retention hours for storage estimate. Default: 24
   -o DIR       Output directory. Default: ogg_sizing_YYYYMMDD_HH24MISS
+  -w DIR       ADB wallet directory. Sets TNS_ADMIN for this execution.
   -a           Autonomous Database mode. Run from a client/wallet connection;
                do not use SYSDBA, OS-local views, or container switching.
   -h           Show this help.
@@ -43,7 +45,7 @@ Options:
 Examples:
   ${SCRIPT_NAME} -c "/ as sysdba"
   ${SCRIPT_NAME} -c "system@prod" -s "ERP%" -p "ERP_PDB" -r 48
-  ${SCRIPT_NAME} -a -c "admin/password@myadb_high" -s "HR"
+  ${SCRIPT_NAME} -a -w "/path/to/Wallet_ADB" -c "admin/password@myadb_high" -s "HR"
 
 Required privileges:
   The connected user needs read access to DBA_* and V$ views. AWR PDB redo
@@ -52,17 +54,20 @@ Required privileges:
   querying schema and object metadata.
   Autonomous mode is designed for Oracle Autonomous Database where SYSDBA and
   database-host execution are not available. Run it from a machine with
-  SQL*Plus/SQLcl and the ADB wallet/TNS configuration.
+  SQL*Plus/SQLcl and the ADB wallet/TNS configuration. If using SQLcl, set
+  SQLPLUS_BIN to the sql executable path, for example SQLPLUS_BIN=/opt/sqlcl/bin/sql.
+  For ADB wallets, either export TNS_ADMIN=/path/to/wallet or pass -w /path/to/wallet.
 USAGE
 }
 
-while getopts "c:s:p:r:o:ah" opt; do
+while getopts "c:s:p:r:o:w:ah" opt; do
   case "$opt" in
     c) CONNECT_STRING=$OPTARG ;;
     s) OWNER_LIKE=$OPTARG ;;
     p) PDB_LIKE=$OPTARG ;;
     r) RETENTION_HOURS=$OPTARG ;;
     o) OUTPUT_BASE=$OPTARG ;;
+    w) WALLET_DIR=$OPTARG ;;
     a) AUTONOMOUS_MODE="Y" ;;
     h)
       usage
@@ -88,8 +93,17 @@ if [ "$RETENTION_HOURS" -lt 4 ]; then
 fi
 
 if ! command -v "$SQLPLUS_BIN" >/dev/null 2>&1; then
-  echo "ERROR: SQL*Plus was not found. Set SQLPLUS_BIN or add sqlplus to PATH." >&2
+  echo "ERROR: SQL*Plus/SQLcl was not found. Set SQLPLUS_BIN to sqlplus or sql, or add it to PATH." >&2
   exit 1
+fi
+
+if [ -n "$WALLET_DIR" ]; then
+  if [ ! -d "$WALLET_DIR" ]; then
+    echo "ERROR: wallet directory does not exist: $WALLET_DIR" >&2
+    exit 2
+  fi
+  TNS_ADMIN=$WALLET_DIR
+  export TNS_ADMIN
 fi
 
 PDB_CONTAINER_COMMAND="prompt Staying in current container for object assessment."
@@ -129,6 +143,7 @@ define owner_like = '&2'
 define pdb_name_like = '&3'
 define trail_retention_hours = '&4'
 define run_stamp = '&5'
+define client_wallet_dir = '&6'
 
 column report_file new_value report_file noprint
 select '&out_dir/ogg_26ai_sizing_report_&run_stamp..txt' report_file from dual;
@@ -380,6 +395,7 @@ prompt Scope filters used by assessment
 prompt ===============================
 prompt Schema LIKE filter: &owner_like
 prompt Trail retention hours: &trail_retention_hours
+prompt Client wallet/TNS_ADMIN path: &client_wallet_dir
 prompt
 prompt Autonomous database inventory
 prompt =============================
@@ -405,7 +421,10 @@ prompt Autonomous mode notes
 prompt =====================
 prompt SYSDBA, OS-local assessment, archived log mining views, and host-level sizing signals are not assumed available.
 prompt Use this report for schema/object readiness and a low-confidence starting point only.
-prompt Provide ADB service metrics, redo/change volume, GoldenGate throughput, network path, target count, and initial-load plan before final sizing.
+prompt SQLcl is supported by setting SQLPLUS_BIN to the sql executable path.
+prompt For ADB wallet connections, set TNS_ADMIN to the wallet directory or run this script with -w WALLET_DIR.
+prompt Provide ADB service metrics, redo/change volume or change-rate equivalent, GoldenGate throughput,
+prompt network path, target count, and initial-load plan before final sizing.
 prompt
 prompt Readiness checks
 prompt ================
@@ -544,10 +563,10 @@ with table_scope as (
 )
 select '- Starting Extract paths: 1 for this ADB source service' from table_scope
 union all
-select '- Reassess using GoldenGate capture throughput and ADB workload metrics.' from table_scope
+select '- Add capture/apply paths only after reviewing GoldenGate throughput, target count, and table grouping.' from table_scope
 union all
 select '- Table-count tier guide: ' ||
-       case score when 1 then '1' when 2 then '1-2' when 3 then '1-2' else 'custom design review' end
+       case score when 1 then '1' when 2 then '1-2' when 3 then '2-4' else 'custom design review' end
   from table_scope;
 prompt - Cache Manager: Autonomous mode does not gather redo history.
 prompt - CACHEMGR input: use ADB change volume or GoldenGate Extract throughput.
@@ -603,6 +622,8 @@ prompt
 prompt Missing inputs before final sizing
 prompt ==================================
 prompt Required: peak and average change volume or redo equivalent by hour/day for the ADB workload.
+prompt Required: ADB service metrics for CPU, sessions, SQL throughput, storage growth, and wait profile during peak windows.
+prompt Required: GoldenGate Extract, Distribution, and Replicat throughput or lag from a representative test when available.
 prompt Required: initial load size and method.
 prompt Required: target count, network path, latency, bandwidth, and GoldenGate deployment location.
 prompt Required: GoldenGate service choice, such as OCI GoldenGate or self-managed GoldenGate.
@@ -627,14 +648,14 @@ echo "Running GoldenGate Autonomous Database sizing assessment..."
 echo "Output directory: $OUTPUT_DIR"
 
 set +e
-"$SQLPLUS_BIN" -s "$CONNECT_STRING" @"$ASSESSMENT_SQL" "$OUTPUT_DIR" "$OWNER_LIKE" "$PDB_LIKE" "$RETENTION_HOURS" "$RUN_STAMP" > "$RUN_LOG" 2>&1
+"$SQLPLUS_BIN" -s "$CONNECT_STRING" @"$ASSESSMENT_SQL" "$OUTPUT_DIR" "$OWNER_LIKE" "$PDB_LIKE" "$RETENTION_HOURS" "$RUN_STAMP" "${TNS_ADMIN:-not set}" > "$RUN_LOG" 2>&1
 SQLPLUS_STATUS=$?
 set -e
 
 REPORT_FILE="${OUTPUT_DIR}/ogg_26ai_sizing_report_${RUN_STAMP}.txt"
 
 if [ "$SQLPLUS_STATUS" -ne 0 ]; then
-  echo "ERROR: SQL*Plus returned status $SQLPLUS_STATUS. See log: $RUN_LOG" >&2
+  echo "ERROR: SQL*Plus/SQLcl returned status $SQLPLUS_STATUS. See log: $RUN_LOG" >&2
   exit "$SQLPLUS_STATUS"
 fi
 
@@ -1631,7 +1652,7 @@ set -e
 REPORT_FILE="${OUTPUT_DIR}/ogg_26ai_sizing_report_${RUN_STAMP}.txt"
 
 if [ "$SQLPLUS_STATUS" -ne 0 ]; then
-  echo "ERROR: SQL*Plus returned status $SQLPLUS_STATUS. See log: $RUN_LOG" >&2
+  echo "ERROR: SQL*Plus/SQLcl returned status $SQLPLUS_STATUS. See log: $RUN_LOG" >&2
   exit "$SQLPLUS_STATUS"
 fi
 
