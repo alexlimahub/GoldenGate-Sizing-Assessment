@@ -33,21 +33,24 @@ REVIEW: Columns requiring GoldenGate datatype or object-shape review: 7
 Workload summary
 ================
 - Archived-log peak hourly: .219 GB/hour
-- Archived-log average hourly: .163 GB/hour
+- Archived-log average hourly: .164 GB/hour
 - Archived-log peak daily: 1.573 GB/day
-- Note: archived logs are a database-level fallback and may overstate selected-PDB/schema scope.
+- Supplied peak redo/change-rate: not supplied GB/hour
+- Supplied average redo/change-rate: not supplied GB/hour
+- Effective peak redo basis: .219 GB/hour
+- Note: archived logs are a database-level fallback and may overstate selected-PDB/schema scope; supplied values override archived-log values when provided.
 
 Replication object scope
 ========================
 - Tables: 14
-- Estimated rows: 270686
+- Estimated rows: 345165
 - Table segment GB: .01
 - Tables without PK/UK: 7
 
 GoldenGate Hub baseline recommendation
 ======================================
 Recommended starting tier: Small
-- Basis: selected from peak hourly redo and table count.
+- Basis: selected from effective peak redo/change rate and table count.
 - Rule: when sizing signals straddle tiers, choose the larger tier.
 - vCPU: 8
 - RAM: 64 GB
@@ -103,8 +106,28 @@ A generally healthy starting target is Extract lag below 5 seconds, Replicat lag
 sustained CPU below 70 percent, trail filesystem below 70 percent, minimal CACHEMGR spill,
 and no recurring resource-related GoldenGate abends.
 
+Appendix A - Tables without primary or unique key
+=================================================
+- HR.DT$_COUNTRIES | rows=0 | partitioned=NO | type=HEAP
+- HR.DT$_DEPARTMENTS | rows=0 | partitioned=NO | type=HEAP
+- HR.DT$_EMPLOYEES | rows=344944 | partitioned=NO | type=HEAP
+- HR.DT$_JOBS | rows=0 | partitioned=NO | type=HEAP
+- HR.DT$_JOB_HISTORY | rows=0 | partitioned=NO | type=HEAP
+- HR.DT$_LOCATIONS | rows=0 | partitioned=NO | type=HEAP
+- HR.DT$_REGIONS | rows=0 | partitioned=NO | type=HEAP
+
+Appendix B - Columns requiring datatype or object-shape review
+=============================================================
+- HR.COUNTRIES.CDRTS$ROW | type=TIMESTAMP(6) | reason=HIDDEN_COLUMN;
+- HR.DEPARTMENTS.CDRTS$ROW | type=TIMESTAMP(6) | reason=HIDDEN_COLUMN;
+- HR.EMPLOYEES.CDRTS$ROW | type=TIMESTAMP(6) | reason=HIDDEN_COLUMN;
+- HR.JOBS.CDRTS$ROW | type=TIMESTAMP(6) | reason=HIDDEN_COLUMN;
+- HR.JOB_HISTORY.CDRTS$ROW | type=TIMESTAMP(6) | reason=HIDDEN_COLUMN;
+- HR.LOCATIONS.CDRTS$ROW | type=TIMESTAMP(6) | reason=HIDDEN_COLUMN;
+- HR.REGIONS.CDRTS$ROW | type=TIMESTAMP(6) | reason=HIDDEN_COLUMN;
+
 Files generated
 ===============
-/opt/oracle/ogg_sizing_dbWEST_sample
+/opt/oracle/ogg_sizing_redo_both_check
 
 End of report.

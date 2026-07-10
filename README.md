@@ -56,6 +56,12 @@ Run against Autonomous Database from a client machine:
 ./ogg_26ai_sizing_assessment.sh -a -w "/path/to/Wallet_ADB" -c 'admin/password@myadb_high' -s "HR"
 ```
 
+Run against Autonomous Database with customer-supplied change-rate inputs:
+
+```sh
+./ogg_26ai_sizing_assessment.sh -a -w "/path/to/Wallet_ADB" -c 'admin/password@myadb_high' -s "HR" -g 80 -b 25
+```
+
 Run against Autonomous Database with SQLcl:
 
 ```sh
@@ -73,6 +79,8 @@ Options:
 -r HOURS     Trail retention hours for storage estimate. Default: 24
 -o DIR       Output directory. Default: ogg_sizing_YYYYMMDD_HH24MISS
 -w DIR       ADB wallet directory. Sets TNS_ADMIN for this execution.
+-g GB        Peak redo/change-rate GB per hour. Optional override/input.
+-b GB        Average redo/change-rate GB per hour. Optional override/input.
 -a           Autonomous Database mode. Use a client/wallet connection; do not use SYSDBA.
 -h           Show help.
 ```
@@ -93,6 +101,19 @@ export SQLPLUS_BIN=/path/to/sql
 When `-p` is an exact PDB name, for example `-p "FREEPDB1"`, the script switches the SQL session into that PDB before assessing schema and object metadata. When `-p` contains a wildcard such as `%`, it is used as a filter only.
 
 Autonomous mode does not gather archived-log or host-local metrics. Its report is intentionally lower confidence and asks for ADB workload metrics, GoldenGate throughput, network path, target count, and initial-load details before final sizing.
+
+When workload information is available, pass peak and average redo/change volume with `-g` and `-b`. For self-managed databases, these values override the archived-log-derived redo basis when the database history is not representative. For Autonomous Database, they provide the redo-equivalent workload input that ADB mode cannot gather from local archived logs.
+
+Because Autonomous mode cannot rely on local archived-log history, its table-count-only baseline is intentionally conservative but less aggressive than redo-based self-managed sizing:
+
+```text
+Small:  fewer than 500 tables
+Medium: 500-2000 tables
+Large:  2001-5000 tables
+Custom: more than 5000 tables, or any workload that needs design review
+```
+
+Move to a larger ADB tier only after reviewing ADB change volume, GoldenGate throughput, target count, target apply capacity, and apply lag from a representative test.
 
 For Autonomous Database wallet connections, either export `TNS_ADMIN` before running the script or pass the wallet directory with `-w`:
 
@@ -144,6 +165,7 @@ The text report includes:
 - starting vCPU, RAM, trail storage, I/O, network, and process-count guidance
 - Extract count and Cache Manager / bounded recovery planning prompts
 - a dedicated Parallel Replicat section with starting guidance for `MAP_PARALLELISM`, `MIN_APPLY_PARALLELISM`, `MAX_APPLY_PARALLELISM`, `APPLY_PARALLELISM`, `SPLIT_TRANS_RECS`, `COMMIT_SERIALIZATION`, `LOOK_AHEAD_TRANSACTIONS`, and `CHUNK_SIZE`
+- appendices listing tables without enabled primary or unique keys and columns requiring GoldenGate datatype or object-shape review
 
 ## Sizing Method
 

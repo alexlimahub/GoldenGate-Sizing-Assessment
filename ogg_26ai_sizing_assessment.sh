@@ -26,6 +26,8 @@ OUTPUT_BASE="ogg_sizing_${RUN_STAMP}"
 SQLPLUS_BIN=${SQLPLUS_BIN:-sqlplus}
 AUTONOMOUS_MODE="N"
 WALLET_DIR=""
+PEAK_REDO_GB_PER_HOUR="UNKNOWN"
+AVG_REDO_GB_PER_HOUR="UNKNOWN"
 
 usage() {
   cat <<USAGE
@@ -38,6 +40,8 @@ Options:
   -r HOURS     Trail retention hours for storage estimate. Default: 24
   -o DIR       Output directory. Default: ogg_sizing_YYYYMMDD_HH24MISS
   -w DIR       ADB wallet directory. Sets TNS_ADMIN for this execution.
+  -g GB        Peak redo/change-rate GB per hour. Optional override/input.
+  -b GB        Average redo/change-rate GB per hour. Optional override/input.
   -a           Autonomous Database mode. Run from a client/wallet connection;
                do not use SYSDBA, OS-local views, or container switching.
   -h           Show this help.
@@ -46,6 +50,7 @@ Examples:
   ${SCRIPT_NAME} -c "/ as sysdba"
   ${SCRIPT_NAME} -c "system@prod" -s "ERP%" -p "ERP_PDB" -r 48
   ${SCRIPT_NAME} -a -w "/path/to/Wallet_ADB" -c "admin/password@myadb_high" -s "HR"
+  ${SCRIPT_NAME} -a -w "/path/to/Wallet_ADB" -c "admin/password@myadb_high" -s "HR" -g 80 -b 25
 
 Required privileges:
   The connected user needs read access to DBA_* and V$ views. AWR PDB redo
@@ -60,7 +65,7 @@ Required privileges:
 USAGE
 }
 
-while getopts "c:s:p:r:o:w:ah" opt; do
+while getopts "c:s:p:r:o:w:g:b:ah" opt; do
   case "$opt" in
     c) CONNECT_STRING=$OPTARG ;;
     s) OWNER_LIKE=$OPTARG ;;
@@ -68,6 +73,8 @@ while getopts "c:s:p:r:o:w:ah" opt; do
     r) RETENTION_HOURS=$OPTARG ;;
     o) OUTPUT_BASE=$OPTARG ;;
     w) WALLET_DIR=$OPTARG ;;
+    g) PEAK_REDO_GB_PER_HOUR=$OPTARG ;;
+    b) AVG_REDO_GB_PER_HOUR=$OPTARG ;;
     a) AUTONOMOUS_MODE="Y" ;;
     h)
       usage
@@ -91,6 +98,21 @@ if [ "$RETENTION_HOURS" -lt 4 ]; then
   echo "ERROR: retention hours must be at least 4." >&2
   exit 2
 fi
+
+validate_decimal() {
+  value=$1
+  label=$2
+  if [ "$value" = "UNKNOWN" ]; then
+    return 0
+  fi
+  if ! awk -v v="$value" 'BEGIN { exit(v ~ /^[0-9]+([.][0-9]+)?$/ ? 0 : 1) }'; then
+    echo "ERROR: $label must be a non-negative number, for example 80 or 80.5." >&2
+    exit 2
+  fi
+}
+
+validate_decimal "$PEAK_REDO_GB_PER_HOUR" "peak redo/change-rate GB/hour"
+validate_decimal "$AVG_REDO_GB_PER_HOUR" "average redo/change-rate GB/hour"
 
 if ! command -v "$SQLPLUS_BIN" >/dev/null 2>&1; then
   echo "ERROR: SQL*Plus/SQLcl was not found. Set SQLPLUS_BIN to sqlplus or sql, or add it to PATH." >&2
@@ -144,6 +166,8 @@ define pdb_name_like = '&3'
 define trail_retention_hours = '&4'
 define run_stamp = '&5'
 define client_wallet_dir = '&6'
+define peak_redo_gb_per_hour = '&7'
+define avg_redo_gb_per_hour = '&8'
 
 column report_file new_value report_file noprint
 select '&out_dir/ogg_26ai_sizing_report_&run_stamp..txt' report_file from dual;
@@ -396,6 +420,8 @@ prompt ===============================
 prompt Schema LIKE filter: &owner_like
 prompt Trail retention hours: &trail_retention_hours
 prompt Client wallet/TNS_ADMIN path: &client_wallet_dir
+prompt Peak redo/change-rate GB/hour input: &peak_redo_gb_per_hour
+prompt Average redo/change-rate GB/hour input: &avg_redo_gb_per_hour
 prompt
 prompt Autonomous database inventory
 prompt =============================
@@ -508,66 +534,169 @@ select '- Tables without PK/UK: ' ||
  where t.owner like upper('&owner_like')
    and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS');
 prompt
+prompt ADB workload inputs
+prompt ===================
+with workload_input as (
+  select case
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as peak_change_gb_per_hour,
+         case
+           when regexp_like('&avg_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&avg_redo_gb_per_hour')
+         end as avg_change_gb_per_hour
+    from dual
+)
+select '- Peak redo/change-rate: ' || nvl(to_char(peak_change_gb_per_hour), 'not supplied') || ' GB/hour'
+  from workload_input
+union all
+select '- Average redo/change-rate: ' || nvl(to_char(avg_change_gb_per_hour), 'not supplied') || ' GB/hour'
+  from workload_input
+union all
+select '- Note: provide ADB service metrics, AWR/OCI metrics, or measured GoldenGate throughput to improve confidence.'
+  from workload_input;
+prompt
 prompt GoldenGate Hub baseline recommendation
 prompt ======================================
-with table_scope as (
+with workload_input as (
+  select case
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as peak_change_gb_per_hour
+    from dual
+),
+workload_score as (
+  select case
+           when peak_change_gb_per_hour is null then 0
+           when peak_change_gb_per_hour < 1 then 1
+           when peak_change_gb_per_hour <= 250 then 2
+           when peak_change_gb_per_hour <= 500 then 3
+           else 5
+         end as score
+    from workload_input
+),
+table_scope as (
   select count(*) as table_count,
          case
-           when count(*) < 100 then 1
-           when count(*) <= 500 then 2
-           when count(*) <= 2000 then 3
+           when count(*) < 500 then 1
+           when count(*) <= 2000 then 2
+           when count(*) <= 5000 then 3
            else 5
          end as score
     from dba_tables
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+),
+recommendation as (
+  select greatest(t.score, w.score) as score,
+         w.score as workload_score
+    from table_scope t cross join workload_score w
 )
-select 'Recommended starting tier: ' ||
+select 'Preliminary starting tier: ' ||
        case score when 1 then 'Small' when 2 then 'Medium' when 3 then 'Large' else 'Custom' end
-  from table_scope;
+  from recommendation;
 prompt - Confidence: low until workload metrics are supplied.
-prompt - Basis: selected from table count only because redo/change history is not gathered in Autonomous mode.
-with table_scope as (
+with workload_input as (
   select case
-           when count(*) < 100 then 1
-           when count(*) <= 500 then 2
-           when count(*) <= 2000 then 3
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as peak_change_gb_per_hour
+    from dual
+),
+workload_score as (
+  select case
+           when peak_change_gb_per_hour is null then 0
+           when peak_change_gb_per_hour < 1 then 1
+           when peak_change_gb_per_hour <= 250 then 2
+           when peak_change_gb_per_hour <= 500 then 3
+           else 5
+         end as score
+    from workload_input
+),
+table_scope as (
+  select case
+           when count(*) < 500 then 1
+           when count(*) <= 2000 then 2
+           when count(*) <= 5000 then 3
            else 5
          end as score
     from dba_tables
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+),
+recommendation as (
+  select greatest(t.score, w.score) as score,
+         w.score as workload_score
+    from table_scope t cross join workload_score w
 )
-select '- vCPU: ' || case score when 1 then '8' when 2 then '16' when 3 then '32' else 'Custom sizing required' end from table_scope
+select '- Basis: ' ||
+       case
+         when workload_score = 0 then 'preliminary object-count baseline only because redo/change history is not gathered in Autonomous mode.'
+         else 'larger of supplied redo/change-rate input and object-count scope.'
+       end
+  from recommendation
 union all
-select '- RAM: ' || case score when 1 then '64 GB' when 2 then '128 GB' when 3 then '256 GB' else 'Custom sizing required' end from table_scope
+select '- Rule: move to a larger tier only after reviewing ADB change volume, GoldenGate throughput, target count, and apply lag.' from recommendation
 union all
-select '- Trail/working disk guide: ' || case score when 1 then '200 GB' when 2 then '500 GB' when 3 then '1-2 TB' else 'Custom sizing required' end from table_scope
+select '- vCPU: ' || case score when 1 then '8' when 2 then '16' when 3 then '32' else 'Custom sizing required' end from recommendation
 union all
-select '- Next step: replace this baseline after reviewing ADB workload metrics and GoldenGate throughput.' from table_scope;
+select '- RAM: ' || case score when 1 then '64 GB' when 2 then '128 GB' when 3 then '256 GB' else 'Custom sizing required' end from recommendation
+union all
+select '- Trail/working disk guide: ' || case score when 1 then '200 GB' when 2 then '500 GB' when 3 then '1-2 TB' else 'Custom sizing required' end from recommendation
+union all
+select '- Calculated trail storage for retention: ' ||
+       case
+         when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+         then to_char(greatest(8, ceil(to_number('&peak_redo_gb_per_hour') * to_number('&trail_retention_hours') * 1.5))) || ' GB'
+         else 'not calculated; provide -g peak redo/change-rate GB/hour'
+       end
+  from recommendation
+union all
+select '- Next step: replace or confirm this baseline after reviewing ADB workload metrics and GoldenGate throughput.' from recommendation;
 prompt
 prompt Process and recovery sizing prompts
 prompt ===================================
 prompt - PDB scope: Autonomous Database service connection.
 prompt - PDB count: not exposed as a host/container sizing input in this mode.
-with table_scope as (
+with workload_input as (
   select case
-           when count(*) < 100 then 1
-           when count(*) <= 500 then 2
-           when count(*) <= 2000 then 3
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as peak_change_gb_per_hour
+    from dual
+),
+workload_score as (
+  select case
+           when peak_change_gb_per_hour is null then 0
+           when peak_change_gb_per_hour < 1 then 1
+           when peak_change_gb_per_hour <= 250 then 2
+           when peak_change_gb_per_hour <= 500 then 3
+           else 5
+         end as score
+    from workload_input
+),
+table_scope as (
+  select case
+           when count(*) < 500 then 1
+           when count(*) <= 2000 then 2
+           when count(*) <= 5000 then 3
            else 5
          end as score
     from dba_tables
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+),
+recommendation as (
+  select greatest(t.score, w.score) as score
+    from table_scope t cross join workload_score w
 )
-select '- Starting Extract paths: 1 for this ADB source service' from table_scope
+select '- Starting Extract paths: 1 for this ADB source service' from recommendation
 union all
-select '- Add capture/apply paths only after reviewing GoldenGate throughput, target count, and table grouping.' from table_scope
+select '- Add capture/apply paths only after reviewing GoldenGate throughput, target count, and table grouping.' from recommendation
 union all
-select '- Table-count tier guide: ' ||
+select '- Process tier guide: ' ||
        case score when 1 then '1' when 2 then '1-2' when 3 then '2-4' else 'custom design review' end
-  from table_scope;
+  from recommendation;
 prompt - Cache Manager: Autonomous mode does not gather redo history.
 prompt - CACHEMGR input: use ADB change volume or GoldenGate Extract throughput.
 prompt - Bounded recovery: size spill headroom from workload metrics and validate with long-running transactions.
@@ -578,46 +707,67 @@ prompt ======================================
 prompt Use this section to start the target apply design. Validate with target database capacity,
 prompt transaction dependencies, constraints, indexes, triggers, and representative workload.
 prompt Oracle reference: https://docs.oracle.com/en/middleware/goldengate/core/21.3/coredoc/replicat-basic-parameters-parallel-replicat.html
-with table_scope as (
+with workload_input as (
   select case
-           when count(*) < 100 then 1
-           when count(*) <= 500 then 2
-           when count(*) <= 2000 then 3
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as peak_change_gb_per_hour
+    from dual
+),
+workload_score as (
+  select case
+           when peak_change_gb_per_hour is null then 0
+           when peak_change_gb_per_hour < 1 then 1
+           when peak_change_gb_per_hour <= 250 then 2
+           when peak_change_gb_per_hour <= 500 then 3
+           else 5
+         end as score
+    from workload_input
+),
+table_scope as (
+  select case
+           when count(*) < 500 then 1
+           when count(*) <= 2000 then 2
+           when count(*) <= 5000 then 3
            else 5
          end as score
     from dba_tables
    where owner like upper('&owner_like')
      and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+),
+recommendation as (
+  select greatest(t.score, w.score) as score
+    from table_scope t cross join workload_score w
 )
 select '- MAP_PARALLELISM starting point: ' ||
        case score when 1 then '2' when 2 then '3' when 3 then '4' else 'custom' end ||
        ' mapper thread(s). Default is 2; valid documented range is 1-100.'
-  from table_scope
+  from recommendation
 union all
-select '- Auto-tuned apply mode: use MIN_APPLY_PARALLELISM and MAX_APPLY_PARALLELISM together.' from table_scope
+select '- Auto-tuned apply mode: use MIN_APPLY_PARALLELISM and MAX_APPLY_PARALLELISM together.' from recommendation
 union all
 select '- MIN_APPLY_PARALLELISM starting point: ' ||
        case score when 1 then '1' when 2 then '2' when 3 then '4' else 'custom' end
-  from table_scope
+  from recommendation
 union all
 select '- MAX_APPLY_PARALLELISM starting point: ' ||
        case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end
-  from table_scope
+  from recommendation
 union all
 select '- Fixed apply mode alternative: APPLY_PARALLELISM starting point: ' ||
        case score when 1 then '4' when 2 then '8' when 3 then '16' else 'custom' end ||
        '. Use only if you do not use MIN/MAX apply parallelism.'
-  from table_scope
+  from recommendation
 union all
-select '- SPLIT_TRANS_RECS: leave disabled initially; consider only for large transactions after dependency and recovery testing.' from table_scope
+select '- SPLIT_TRANS_RECS: leave disabled initially; consider only for large transactions after dependency and recovery testing.' from recommendation
 union all
-select '- COMMIT_SERIALIZATION: use FULL only when target commit order must be forced; validate throughput impact.' from table_scope
+select '- COMMIT_SERIALIZATION: use FULL only when target commit order must be forced; validate throughput impact.' from recommendation
 union all
-select '- LOOK_AHEAD_TRANSACTIONS: keep the default starting point unless scheduling tests show a bottleneck.' from table_scope
+select '- LOOK_AHEAD_TRANSACTIONS: keep the default starting point unless scheduling tests show a bottleneck.' from recommendation
 union all
-select '- CHUNK_SIZE: keep the default starting point; increasing it can consume more Replicat memory.' from table_scope
+select '- CHUNK_SIZE: keep the default starting point; increasing it can consume more Replicat memory.' from recommendation
 union all
-select '- Replace after reviewing target apply capacity, ADB service metrics, and GoldenGate lag.' from table_scope;
+select '- Replace after reviewing target apply capacity, ADB service metrics, and GoldenGate lag.' from recommendation;
 prompt
 prompt Missing inputs before final sizing
 prompt ==================================
@@ -634,6 +784,69 @@ prompt Validate this baseline with production-representative workload before go-
 prompt For ADB sources, include OCI service metrics, GoldenGate Extract/Distribution/Replicat lag,
 prompt network throughput, target apply rate, trail growth, and end-to-end recovery procedures.
 prompt
+prompt Appendix A - Tables without primary or unique key
+prompt =================================================
+with table_keys as (
+  select owner, table_name,
+         max(case when constraint_type = 'P' then 1 else 0 end) as has_pk,
+         max(case when constraint_type = 'U' then 1 else 0 end) as has_uk
+    from dba_constraints
+   where owner like upper('&owner_like')
+     and status = 'ENABLED'
+     and constraint_type in ('P','U')
+   group by owner, table_name
+),
+no_key_tables as (
+  select t.owner, t.table_name, nvl(t.num_rows, 0) as num_rows,
+         t.partitioned, nvl(t.iot_type, 'HEAP') as table_type
+    from dba_tables t
+    left join table_keys k on k.owner = t.owner and k.table_name = t.table_name
+   where t.owner like upper('&owner_like')
+     and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+     and nvl(k.has_pk, 0) = 0
+     and nvl(k.has_uk, 0) = 0
+)
+select case when count(*) = 0 then 'No tables without enabled primary key or unique key were found for this scope.' end
+  from no_key_tables
+having count(*) = 0
+union all
+select '- ' || owner || '.' || table_name || ' | rows=' || to_char(num_rows) ||
+       ' | partitioned=' || partitioned || ' | type=' || table_type
+  from no_key_tables
+ order by 1;
+prompt
+prompt Appendix B - Columns requiring datatype or object-shape review
+prompt =============================================================
+with review_columns as (
+  select owner, table_name, column_name, data_type,
+         trim(
+           case when data_type in ('LONG','LONG RAW') then 'LONG_OR_LONG_RAW; ' end ||
+           case when data_type in ('BFILE','ROWID','UROWID','ANYDATA','ANYTYPE','ANYDATASET','URITYPE','XMLTYPE') then 'SPECIAL_DATATYPE_REVIEW; ' end ||
+           case when data_type like '%LOB' then 'LOB_REVIEW; ' end ||
+           case when data_type_owner is not null then 'USER_OR_SYSTEM_DEFINED_TYPE_REVIEW; ' end ||
+           case when hidden_column = 'YES' then 'HIDDEN_COLUMN; ' end ||
+           case when virtual_column = 'YES' then 'VIRTUAL_COLUMN; ' end
+         ) as review_reason
+    from dba_tab_cols
+   where owner like upper('&owner_like')
+     and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+     and (
+       data_type in ('LONG','LONG RAW','BFILE','ROWID','UROWID','ANYDATA','ANYTYPE','ANYDATASET','URITYPE','XMLTYPE')
+       or data_type like '%LOB'
+       or data_type_owner is not null
+       or hidden_column = 'YES'
+       or virtual_column = 'YES'
+     )
+)
+select case when count(*) = 0 then 'No datatype or object-shape review columns were found for this scope.' end
+  from review_columns
+having count(*) = 0
+union all
+select '- ' || owner || '.' || table_name || '.' || column_name ||
+       ' | type=' || data_type || ' | reason=' || review_reason
+  from review_columns
+ order by 1;
+prompt
 prompt Files generated
 prompt ===============
 select '&out_dir' from dual;
@@ -648,7 +861,7 @@ echo "Running GoldenGate Autonomous Database sizing assessment..."
 echo "Output directory: $OUTPUT_DIR"
 
 set +e
-"$SQLPLUS_BIN" -s "$CONNECT_STRING" @"$ASSESSMENT_SQL" "$OUTPUT_DIR" "$OWNER_LIKE" "$PDB_LIKE" "$RETENTION_HOURS" "$RUN_STAMP" "${TNS_ADMIN:-not set}" > "$RUN_LOG" 2>&1
+"$SQLPLUS_BIN" -s "$CONNECT_STRING" @"$ASSESSMENT_SQL" "$OUTPUT_DIR" "$OWNER_LIKE" "$PDB_LIKE" "$RETENTION_HOURS" "$RUN_STAMP" "${TNS_ADMIN:-not set}" "$PEAK_REDO_GB_PER_HOUR" "$AVG_REDO_GB_PER_HOUR" > "$RUN_LOG" 2>&1
 SQLPLUS_STATUS=$?
 set -e
 
@@ -692,6 +905,8 @@ define owner_like = '&2'
 define pdb_name_like = '&3'
 define trail_retention_hours = '&4'
 define run_stamp = '&5'
+define peak_redo_gb_per_hour = '&6'
+define avg_redo_gb_per_hour = '&7'
 
 column report_file new_value report_file noprint
 select '&out_dir/ogg_26ai_sizing_report_&run_stamp..txt' report_file from dual;
@@ -701,6 +916,8 @@ prompt Output directory: &out_dir
 prompt Schema filter: &owner_like
 prompt PDB filter: &pdb_name_like
 prompt Trail retention hours: &trail_retention_hours
+prompt Peak redo/change-rate input: &peak_redo_gb_per_hour
+prompt Average redo/change-rate input: &avg_redo_gb_per_hour
 
 set markup csv on delimiter , quote on
 
@@ -1199,7 +1416,18 @@ select 'REVIEW: Columns requiring GoldenGate datatype or object-shape review: ' 
 prompt
 prompt Workload summary
 prompt ================
-with hourly as (
+with supplied as (
+  select case
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as supplied_peak_gb,
+         case
+           when regexp_like('&avg_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&avg_redo_gb_per_hour')
+         end as supplied_avg_gb
+    from dual
+),
+hourly as (
   select round(sum(blocks * block_size) / 1024 / 1024 / 1024, 3) as redo_gb
     from v$archived_log
    where first_time >= sysdate - 7
@@ -1223,14 +1451,23 @@ daily_agg as (
     from daily
 )
 select '- Archived-log peak hourly: ' || nvl(to_char(h.peak_hourly_gb), '0') || ' GB/hour'
-  from hourly_agg h cross join daily_agg d
+  from hourly_agg h cross join daily_agg d cross join supplied s
 union all
 select '- Archived-log average hourly: ' || nvl(to_char(h.avg_hourly_gb), '0') || ' GB/hour'
-  from hourly_agg h cross join daily_agg d
+  from hourly_agg h cross join daily_agg d cross join supplied s
 union all
 select '- Archived-log peak daily: ' || nvl(to_char(d.peak_daily_gb), '0') || ' GB/day'
-  from hourly_agg h cross join daily_agg d;
-prompt - Note: archived logs are a database-level fallback and may overstate selected-PDB/schema scope.
+  from hourly_agg h cross join daily_agg d cross join supplied s
+union all
+select '- Supplied peak redo/change-rate: ' || nvl(to_char(s.supplied_peak_gb), 'not supplied') || ' GB/hour'
+  from hourly_agg h cross join daily_agg d cross join supplied s
+union all
+select '- Supplied average redo/change-rate: ' || nvl(to_char(s.supplied_avg_gb), 'not supplied') || ' GB/hour'
+  from hourly_agg h cross join daily_agg d cross join supplied s
+union all
+select '- Effective peak redo basis: ' || nvl(to_char(nvl(s.supplied_peak_gb, h.peak_hourly_gb)), '0') || ' GB/hour'
+  from hourly_agg h cross join daily_agg d cross join supplied s;
+prompt - Note: archived logs are a database-level fallback and may overstate selected-PDB/schema scope; supplied values override archived-log values when provided.
 prompt
 prompt Replication object scope
 prompt ========================
@@ -1277,7 +1514,14 @@ select '- Tables without PK/UK: ' ||
 prompt
 prompt GoldenGate Hub baseline recommendation
 prompt ======================================
-with hourly as (
+with supplied as (
+  select case
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as supplied_peak_gb
+    from dual
+),
+hourly as (
   select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
     from v$archived_log
    where first_time >= sysdate - 7
@@ -1286,14 +1530,15 @@ with hourly as (
 ),
 redo_score as (
   select case
-           when nvl(max(redo_gb), 0) < 1 then 1
-           when nvl(max(redo_gb), 0) <= 500 then 2
-           when nvl(max(redo_gb), 0) <= 1024 then 3
+           when nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)) < 1 then 1
+           when nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)) <= 500 then 2
+           when nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)) <= 1024 then 3
            else 4
          end as score,
-         round(nvl(max(redo_gb), 0), 3) as peak_redo_gb_per_hour,
-         round(nvl(avg(redo_gb), 0), 3) as avg_redo_gb_per_hour
-    from hourly
+         round(nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)), 3) as peak_redo_gb_per_hour,
+         round(nvl(avg(h.redo_gb), 0), 3) as avg_redo_gb_per_hour
+    from supplied s left join hourly h on 1 = 1
+   group by s.supplied_peak_gb
 ),
 table_scope as (
   select count(*) as table_count,
@@ -1318,9 +1563,16 @@ recommendation as (
 select 'Recommended starting tier: ' ||
        case score when 1 then 'Small' when 2 then 'Medium' when 3 then 'Large' else 'X-Large' end
   from recommendation;
-prompt - Basis: selected from peak hourly redo and table count.
+prompt - Basis: selected from effective peak redo/change rate and table count.
 prompt - Rule: when sizing signals straddle tiers, choose the larger tier.
-with hourly as (
+with supplied as (
+  select case
+           when regexp_like('&peak_redo_gb_per_hour', '^[0-9]+(\.[0-9]+)?$')
+           then to_number('&peak_redo_gb_per_hour')
+         end as supplied_peak_gb
+    from dual
+),
+hourly as (
   select sum(blocks * block_size) / 1024 / 1024 / 1024 as redo_gb
     from v$archived_log
    where first_time >= sysdate - 7
@@ -1329,13 +1581,14 @@ with hourly as (
 ),
 redo_score as (
   select case
-           when nvl(max(redo_gb), 0) < 1 then 1
-           when nvl(max(redo_gb), 0) <= 500 then 2
-           when nvl(max(redo_gb), 0) <= 1024 then 3
+           when nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)) < 1 then 1
+           when nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)) <= 500 then 2
+           when nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)) <= 1024 then 3
            else 4
          end as score,
-         round(nvl(max(redo_gb), 0), 3) as peak_redo_gb_per_hour
-    from hourly
+         round(nvl(s.supplied_peak_gb, nvl(max(h.redo_gb), 0)), 3) as peak_redo_gb_per_hour
+    from supplied s left join hourly h on 1 = 1
+   group by s.supplied_peak_gb
 ),
 table_scope as (
   select case
@@ -1627,6 +1880,69 @@ prompt A generally healthy starting target is Extract lag below 5 seconds, Repli
 prompt sustained CPU below 70 percent, trail filesystem below 70 percent, minimal CACHEMGR spill,
 prompt and no recurring resource-related GoldenGate abends.
 prompt
+prompt Appendix A - Tables without primary or unique key
+prompt =================================================
+with table_keys as (
+  select owner, table_name,
+         max(case when constraint_type = 'P' then 1 else 0 end) as has_pk,
+         max(case when constraint_type = 'U' then 1 else 0 end) as has_uk
+    from dba_constraints
+   where owner like upper('&owner_like')
+     and status = 'ENABLED'
+     and constraint_type in ('P','U')
+   group by owner, table_name
+),
+no_key_tables as (
+  select t.owner, t.table_name, nvl(t.num_rows, 0) as num_rows,
+         t.partitioned, nvl(t.iot_type, 'HEAP') as table_type
+    from dba_tables t
+    left join table_keys k on k.owner = t.owner and k.table_name = t.table_name
+   where t.owner like upper('&owner_like')
+     and t.owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+     and nvl(k.has_pk, 0) = 0
+     and nvl(k.has_uk, 0) = 0
+)
+select case when count(*) = 0 then 'No tables without enabled primary key or unique key were found for this scope.' end
+  from no_key_tables
+having count(*) = 0
+union all
+select '- ' || owner || '.' || table_name || ' | rows=' || to_char(num_rows) ||
+       ' | partitioned=' || partitioned || ' | type=' || table_type
+  from no_key_tables
+ order by 1;
+prompt
+prompt Appendix B - Columns requiring datatype or object-shape review
+prompt =============================================================
+with review_columns as (
+  select owner, table_name, column_name, data_type,
+         trim(
+           case when data_type in ('LONG','LONG RAW') then 'LONG_OR_LONG_RAW; ' end ||
+           case when data_type in ('BFILE','ROWID','UROWID','ANYDATA','ANYTYPE','ANYDATASET','URITYPE','XMLTYPE') then 'SPECIAL_DATATYPE_REVIEW; ' end ||
+           case when data_type like '%LOB' then 'LOB_REVIEW; ' end ||
+           case when data_type_owner is not null then 'USER_OR_SYSTEM_DEFINED_TYPE_REVIEW; ' end ||
+           case when hidden_column = 'YES' then 'HIDDEN_COLUMN; ' end ||
+           case when virtual_column = 'YES' then 'VIRTUAL_COLUMN; ' end
+         ) as review_reason
+    from dba_tab_cols
+   where owner like upper('&owner_like')
+     and owner not in ('SYS','SYSTEM','XDB','CTXSYS','MDSYS','ORDSYS','OUTLN','WMSYS')
+     and (
+       data_type in ('LONG','LONG RAW','BFILE','ROWID','UROWID','ANYDATA','ANYTYPE','ANYDATASET','URITYPE','XMLTYPE')
+       or data_type like '%LOB'
+       or data_type_owner is not null
+       or hidden_column = 'YES'
+       or virtual_column = 'YES'
+     )
+)
+select case when count(*) = 0 then 'No datatype or object-shape review columns were found for this scope.' end
+  from review_columns
+having count(*) = 0
+union all
+select '- ' || owner || '.' || table_name || '.' || column_name ||
+       ' | type=' || data_type || ' | reason=' || review_reason
+  from review_columns
+ order by 1;
+prompt
 prompt Files generated
 prompt ===============
 select '&out_dir' from dual;
@@ -1645,7 +1961,7 @@ echo "Running GoldenGate sizing assessment..."
 echo "Output directory: $OUTPUT_DIR"
 
 set +e
-"$SQLPLUS_BIN" -s "$CONNECT_STRING" @"$ASSESSMENT_SQL" "$OUTPUT_DIR" "$OWNER_LIKE" "$PDB_LIKE" "$RETENTION_HOURS" "$RUN_STAMP" > "$RUN_LOG" 2>&1
+"$SQLPLUS_BIN" -s "$CONNECT_STRING" @"$ASSESSMENT_SQL" "$OUTPUT_DIR" "$OWNER_LIKE" "$PDB_LIKE" "$RETENTION_HOURS" "$RUN_STAMP" "$PEAK_REDO_GB_PER_HOUR" "$AVG_REDO_GB_PER_HOUR" > "$RUN_LOG" 2>&1
 SQLPLUS_STATUS=$?
 set -e
 
